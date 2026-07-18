@@ -1,17 +1,21 @@
-name: Stock Downtrend Alerts
+name: Analysis Alerts
 
 on:
   push:
-    branches: [ "main" ]        # change if your default branch differs
+    branches: ["main"]
   workflow_dispatch: {}
   schedule:
-    - cron: "15 13 * * 1-5"     # weekdays 13:15 UTC
+    - cron: "*/15 * * * *"
 
 jobs:
   run-alerts:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: [crypto]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,13 +29,36 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install -e .
+
+      - name: Verify email configuration
+        env:
+          SMTP_HOST: ${{ vars.SMTP_HOST || 'smtp.gmail.com' }}
+          SMTP_PORT: ${{ vars.SMTP_PORT || '587' }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          ALERT_EMAIL_TO: ${{ vars.ALERT_EMAIL_TO || vars.EMAIL_TO || '' }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+
+          required = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "ALERT_EMAIL_TO"]
+          missing = [name for name in required if not os.getenv(name)]
+          if missing:
+              print("Email configuration missing:", ", ".join(missing))
+              print("The workflow will continue, but email alerts will be skipped until these are set.")
+              sys.exit(0)
+          print("Email configuration looks present.")
+          PY
 
       - name: Run alerts
         env:
-          TICKERS:    ${{ vars.TICKERS }}
-          EMAIL_FROM: ${{ vars.EMAIL_FROM }}
-          EMAIL_TO:   ${{ vars.EMAIL_TO }}
-          SMTP_USER:  ${{ secrets.SMTP_USER }}
-          SMTP_PASS:  ${{ secrets.SMTP_PASS }}
+          SMTP_HOST: ${{ vars.SMTP_HOST || 'smtp.gmail.com' }}
+          SMTP_PORT: ${{ vars.SMTP_PORT || '587' }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          ALERT_EMAIL_TO: ${{ vars.ALERT_EMAIL_TO || vars.EMAIL_TO || '' }}
+          CANDLE_INTERVAL_MIN: "15"
         run: |
-          python alert_downtrends.py
+          python -m technical_analysis.cli ${{ matrix.workspace }}

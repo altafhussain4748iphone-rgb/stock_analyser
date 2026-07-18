@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "technical-analysis"
+version = "0.1.0"
+description = "Modular crypto and stock analysis automation"
+requires-python = ">=3.10"
+dependencies = ["requests"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["technical_analysis*"]
