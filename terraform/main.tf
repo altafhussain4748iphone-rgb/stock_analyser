@@ -1,24 +1,18 @@
-data "google_project" "current" {
-  project_id = var.project_id
-
-  # On a fresh project the Cloud Resource Manager API (which this data
-  # source calls) may not be enabled yet. Forcing this to wait until after
-  # google_project_service.apis is applied avoids a chicken-and-egg failure
-  # on the very first `terraform apply`.
-  depends_on = [google_project_service.apis]
-}
-
 locals {
   required_apis = [
     "run.googleapis.com",
     "cloudscheduler.googleapis.com",
     "artifactregistry.googleapis.com",
     "secretmanager.googleapis.com",
-    "cloudbuild.googleapis.com",
     "iam.googleapis.com",
     "logging.googleapis.com",
     "cloudresourcemanager.googleapis.com",
   ]
+
+  # Deploys (scripts/deploy.sh) run locally under this same SA/key
+  # (google_credentials.json), so it's granted the roles needed to push
+  # images and update Cloud Run Jobs -- see iam.tf.
+  deployer_email = "terraform-deployer@${var.project_id}.iam.gserviceaccount.com"
 }
 
 resource "google_project_service" "apis" {

@@ -52,4 +52,4 @@ Set these in your shell, or as Terraform variables when deploying (see below):
 - ALERT_STATE_FILE (optional)
 
 ## Deployment
-Runs on Google Cloud Run Jobs + Cloud Scheduler + Cloud Build, provisioned with Terraform (no GitHub Actions). See [DEPLOYMENT.md](DEPLOYMENT.md) for setup, how to deploy, how to add a new scheduled script, and how to view logs.
+Runs on Google Cloud Run Jobs + Cloud Scheduler, provisioned with Terraform. Deploys are always run locally via `scripts/deploy.sh` — no GitHub Actions, no CI/CD. See [DEPLOYMENT.md](DEPLOYMENT.md) for setup, how to deploy, how to add a new scheduled script, and how to view logs.

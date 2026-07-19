@@ -10,32 +10,15 @@ variable "region" {
   default     = "us-central1"
 }
 
-variable "github_owner" {
-  description = "GitHub org/user that owns the source repo (for the Cloud Build trigger)."
-  type        = string
-  default     = "altafhussain4748iphone-rgb"
-}
-
-variable "github_repo" {
-  description = "GitHub repo name (for the Cloud Build trigger)."
-  type        = string
-  default     = "stock_analyser"
-}
-
-variable "github_branch" {
-  description = "Branch that triggers a build/deploy on push."
-  type        = string
-  default     = "^main$"
-}
-
 variable "container_image" {
   description = <<-EOT
     Image used when a Cloud Run Job is first created. A public placeholder is
     used because Cloud Run requires an existing, pullable image at creation
-    time and Artifact Registry starts out empty. Once the Cloud Build trigger
-    runs (on the first push to main) it repoints each job at the real image,
-    and `ignore_changes` on the job's container spec stops Terraform from
-    reverting that on subsequent applies.
+    time and Artifact Registry starts out empty. Run `scripts/deploy.sh`
+    right after the first `terraform apply` to build and push the real
+    image and point each job at it -- `ignore_changes` on the job's
+    container spec stops subsequent `terraform apply` runs from reverting
+    that back to this placeholder.
   EOT
   type        = string
   default     = "us-docker.pkg.dev/cloudrun/container/job:latest"

@@ -23,22 +23,24 @@ resource "google_project_iam_member" "runtime_log_writer" {
   member  = "serviceAccount:${google_service_account.analyser_runtime.email}"
 }
 
-# Cloud Build's default SA needs to push images and deploy new job revisions.
-resource "google_project_iam_member" "cloudbuild_run_developer" {
+# The terraform-deployer SA doubles as the local deploy identity
+# (scripts/deploy.sh): it needs to push images and update Cloud Run Job
+# revisions from your machine.
+resource "google_project_iam_member" "deployer_run_developer" {
   project = var.project_id
   role    = "roles/run.developer"
-  member  = "serviceAccount:${data.google_project.current.number}@cloudbuild.gserviceaccount.com"
+  member  = "serviceAccount:${local.deployer_email}"
 }
 
-resource "google_project_iam_member" "cloudbuild_artifactregistry_writer" {
+resource "google_project_iam_member" "deployer_artifactregistry_writer" {
   project = var.project_id
   role    = "roles/artifactregistry.writer"
-  member  = "serviceAccount:${data.google_project.current.number}@cloudbuild.gserviceaccount.com"
+  member  = "serviceAccount:${local.deployer_email}"
 }
 
 # `gcloud run jobs update` needs to act as the job's runtime SA.
-resource "google_service_account_iam_member" "cloudbuild_act_as_runtime" {
+resource "google_service_account_iam_member" "deployer_act_as_runtime" {
   service_account_id = google_service_account.analyser_runtime.name
   role               = "roles/iam.serviceAccountUser"
-  member             = "serviceAccount:${data.google_project.current.number}@cloudbuild.gserviceaccount.com"
+  member             = "serviceAccount:${local.deployer_email}"
 }

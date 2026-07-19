@@ -1,8 +1,8 @@
 # Each analyser workflow gets its own Cloud Run Job + Cloud Scheduler trigger.
 # To add a new script once it's ready (e.g. technical_analysis/stocks/alerts.py
 # is implemented): copy this block, change `name`/`workspace_arg`/`schedule`,
-# and add a matching `gcloud run jobs update analyser-<name> ...` step to
-# cloudbuild.yaml so pushes deploy it too.
+# `terraform apply`, then add its name to ALL_JOBS in scripts/deploy.sh so
+# local deploys pick it up too.
 module "crypto_analyser" {
   source = "./modules/analyser_job"
 

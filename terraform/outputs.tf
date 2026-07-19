@@ -5,7 +5,3 @@ output "artifact_registry_repo" {
 output "crypto_job_logs_url" {
   value = module.crypto_analyser.logs_url
 }
-
-output "cloud_build_trigger_console_url" {
-  value = "https://console.cloud.google.com/cloud-build/triggers;region=global?project=${var.project_id}"
-}
