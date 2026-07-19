@@ -29,10 +29,6 @@ REQUEST_RETRY_DELAY_SEC = 1.5
 REQUEST_DELAY_SEC = 0.5
 API_ERROR_ALERT_THRESHOLD = 5
 
-# Wait briefly after a 15-minute boundary so Kraken has time to publish the
-# newly closed candle. Loop mode aligns scans to candle boundaries.
-CANDLE_CLOSE_GRACE_SECONDS = 8
-
 
 # -----------------------------------------------------------------------------
 # Breakout settings
@@ -77,6 +73,19 @@ CONFIRM_RETEST_TOLERANCE_ATR = 0.25
 
 
 # -----------------------------------------------------------------------------
+# Volume-spike settings
+#
+# A simpler, separate job: alert on any pair whose latest closed candle shows
+# a volume spike and a large price move, without the breakout/candle-quality
+# filters above. Liquidity filters are still reused so alerts stay on
+# tradable pairs.
+# -----------------------------------------------------------------------------
+
+VOLUME_SPIKE_MULTIPLE = 3.0
+PRICE_CHANGE_ALERT_PCT = 1.5
+
+
+# -----------------------------------------------------------------------------
 # Application configuration and logging
 # -----------------------------------------------------------------------------
 
@@ -90,6 +99,15 @@ ALERT_STATE_FILE = get_env(
         "..",
         "..",
         "kraken_alert_state.json",
+    ),
+)
+VOLUME_ALERT_STATE_FILE = get_env(
+    "VOLUME_ALERT_STATE_FILE",
+    os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..",
+        "..",
+        "kraken_volume_alert_state.json",
     ),
 )
 
@@ -142,12 +160,12 @@ def utc_datetime(epoch_seconds):
     return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc)
 
 
-def load_state():
-    if not os.path.exists(ALERT_STATE_FILE):
+def load_state(state_file=ALERT_STATE_FILE):
+    if not os.path.exists(state_file):
         return {}
 
     try:
-        with open(ALERT_STATE_FILE, "r", encoding="utf-8") as handle:
+        with open(state_file, "r", encoding="utf-8") as handle:
             state = json.load(handle)
         return state if isinstance(state, dict) else {}
     except Exception as exc:
@@ -155,15 +173,15 @@ def load_state():
         return {}
 
 
-def save_state(state):
-    directory = os.path.dirname(os.path.abspath(ALERT_STATE_FILE))
-    temporary_path = f"{ALERT_STATE_FILE}.tmp"
+def save_state(state, state_file=ALERT_STATE_FILE):
+    directory = os.path.dirname(os.path.abspath(state_file))
+    temporary_path = f"{state_file}.tmp"
 
     try:
         os.makedirs(directory, exist_ok=True)
         with open(temporary_path, "w", encoding="utf-8") as handle:
             json.dump(state, handle, separators=(",", ":"), sort_keys=True)
-        os.replace(temporary_path, ALERT_STATE_FILE)
+        os.replace(temporary_path, state_file)
     except Exception as exc:
         log.warning("Could not write state file: %s", exc)
         try:
@@ -230,25 +248,6 @@ def calculate_atr(candles, period):
         return None
 
     return sum(true_ranges) / len(true_ranges)
-
-
-def seconds_until_next_candle_scan(interval_minutes):
-    """
-    Return seconds until the next interval boundary plus a short grace period.
-
-    Starting at 12:15:03 with an 8-second grace waits about five seconds and
-    scans at 12:15:08. Starting at 12:15:20 waits for 12:30:08.
-    """
-    interval_seconds = interval_minutes * 60
-    now = time.time()
-    current_boundary = (int(now) // interval_seconds) * interval_seconds
-    current_target = current_boundary + CANDLE_CLOSE_GRACE_SECONDS
-
-    if now <= current_target:
-        return max(0.0, current_target - now)
-
-    next_target = current_boundary + interval_seconds + CANDLE_CLOSE_GRACE_SECONDS
-    return max(0.0, next_target - now)
 
 
 # -----------------------------------------------------------------------------
@@ -658,6 +657,130 @@ def evaluate_pair(
 
 
 # -----------------------------------------------------------------------------
+# Volume-spike evaluation
+# -----------------------------------------------------------------------------
+
+
+def evaluate_volume_price_candle(pair, wsname, history, signal_candle):
+    if len(history) < VOLUME_LOOKBACK:
+        return None
+
+    if signal_candle["open"] <= 0:
+        return None
+
+    volume_window = history[-VOLUME_LOOKBACK:]
+    historical_quote_volumes = [
+        candle["volume"] * candle["vwap"] for candle in volume_window
+    ]
+    current_quote_volume = signal_candle["volume"] * signal_candle["vwap"]
+    median_quote_volume = median(historical_quote_volumes)
+
+    if median_quote_volume <= 0:
+        return None
+
+    volume_multiple = current_quote_volume / median_quote_volume
+
+    historical_trade_counts = [candle["count"] for candle in volume_window]
+    median_trade_count = median(historical_trade_counts)
+
+    price_change_pct = (
+        (signal_candle["close"] - signal_candle["open"])
+        / signal_candle["open"]
+        * 100.0
+    )
+
+    passes_volume = volume_multiple >= VOLUME_SPIKE_MULTIPLE
+    passes_price = abs(price_change_pct) >= PRICE_CHANGE_ALERT_PCT
+    passes_liquidity = (
+        median_quote_volume >= MIN_MEDIAN_QUOTE_VOLUME
+        and median_trade_count >= MIN_MEDIAN_TRADE_COUNT
+        and signal_candle["count"] >= MIN_SIGNAL_TRADE_COUNT
+    )
+
+    log.debug(
+        "%s: price=%+.2f%% volume=%.2fx median_quote_volume=%.2f "
+        "median_trades=%.1f signal_trades=%d "
+        "filters(volume=%s price=%s liquidity=%s)",
+        wsname or pair,
+        price_change_pct,
+        volume_multiple,
+        median_quote_volume,
+        median_trade_count,
+        signal_candle["count"],
+        passes_volume,
+        passes_price,
+        passes_liquidity,
+    )
+
+    if not (passes_volume and passes_price and passes_liquidity):
+        return None
+
+    direction = "UP" if price_change_pct > 0 else "DOWN"
+
+    return {
+        "pair": wsname or pair,
+        "pair_key": pair,
+        "direction": direction,
+        "open": signal_candle["open"],
+        "high": signal_candle["high"],
+        "low": signal_candle["low"],
+        "close": signal_candle["close"],
+        "price_change_pct": price_change_pct,
+        "base_volume": signal_candle["volume"],
+        "quote_volume": current_quote_volume,
+        "median_quote_volume": median_quote_volume,
+        "volume_multiple": volume_multiple,
+        "signal_trade_count": signal_candle["count"],
+        "median_trade_count": median_trade_count,
+        "signal_time": utc_datetime(signal_candle["time"]),
+        "signal_epoch": signal_candle["time"],
+    }
+
+
+def evaluate_volume_price_pair(
+    pair,
+    wsname,
+    interval_minutes,
+    state,
+    error_sink=None,
+):
+    # Extra candles: 1 = Kraken's currently forming candle (never evaluated),
+    # 1 = the closed signal candle.
+    requested_count = VOLUME_LOOKBACK + 2
+
+    candles = get_candles(
+        pair,
+        requested_count,
+        interval_minutes,
+        error_sink=error_sink,
+    )
+
+    if not candles or len(candles) < requested_count:
+        return None
+
+    # Kraken's final OHLC item is the currently forming candle.
+    closed_candles = candles[:-1]
+    history = closed_candles[:-1]
+    signal_candle = closed_candles[-1]
+
+    hit = evaluate_volume_price_candle(pair, wsname, history, signal_candle)
+    if hit is None:
+        return None
+
+    alert_epoch = signal_candle["time"]
+
+    if in_cooldown(state, pair, alert_epoch, interval_minutes):
+        log.debug(
+            "%s: passed volume/price filters but is still in cooldown",
+            wsname or pair,
+        )
+        return None
+
+    hit["alert_epoch"] = alert_epoch
+    return hit
+
+
+# -----------------------------------------------------------------------------
 # Email output
 # -----------------------------------------------------------------------------
 
@@ -721,6 +844,36 @@ def build_email_content(
         lines.extend(["</ul>", "</body></html>"])
         return subject, "".join(lines)
 
+    if alert_type == "crypto_volume_alert":
+        hits = list(hits or [])
+
+        subject = f"Kraken Volume Spike Alerts: {len(hits)} pair(s) ({label})"
+        lines = [
+            "<html><body>",
+            "<h2>Kraken Volume Spike Alerts</h2>",
+            f"<p><strong>Interval:</strong> {html.escape(label)}</p>",
+            f"<p>Signals passed volume &gt;= {VOLUME_SPIKE_MULTIPLE:.1f}x median and "
+            f"price move &gt;= {PRICE_CHANGE_ALERT_PCT:.1f}% on the closed signal "
+            "candle, plus liquidity filters.</p>",
+            "<ul>",
+        ]
+
+        for hit in hits:
+            pair = html.escape(str(hit["pair"]))
+            signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M UTC")
+
+            lines.append(
+                f"<li><strong>{pair}</strong> {hit['direction']}"
+                f" · move {hit['price_change_pct']:+.2f}%"
+                f" · close {hit['close']:.8g}"
+                f" · quote volume ${hit['quote_volume']:,.0f}"
+                f" ({hit['volume_multiple']:.1f}x median)"
+                f" · signal {signal_time}</li>"
+            )
+
+        lines.extend(["</ul>", "</body></html>"])
+        return subject, "".join(lines)
+
     subject = "Kraken API Error"
     details = [
         "<html><body>",
@@ -755,6 +908,15 @@ def send_crypto_alert(
         hits=hits,
         interval_minutes=interval_minutes,
         require_next_candle_confirmation=require_next_candle_confirmation,
+    )
+    send_html_email(subject, body, html=True)
+
+
+def send_volume_price_alert(hits, interval_minutes):
+    subject, body = build_email_content(
+        "crypto_volume_alert",
+        hits=hits,
+        interval_minutes=interval_minutes,
     )
     send_html_email(subject, body, html=True)
 
@@ -894,53 +1056,123 @@ def scan_once(interval_minutes, require_next_candle_confirmation=False):
     return hits
 
 
+def scan_once_volume_price(interval_minutes):
+    label = format_interval(interval_minutes)
+    log.info(
+        "=== Starting volume-spike scan (interval=%s) ===",
+        label,
+    )
+
+    state = load_state(VOLUME_ALERT_STATE_FILE)
+    api_errors = []
+
+    try:
+        pairs = get_tradable_pairs(error_sink=api_errors)
+    except Exception as exc:
+        log.error("Unable to fetch Kraken pairs: %s", exc)
+        send_error_alert(
+            str(exc),
+            context="Fetching tradable pairs",
+            interval_minutes=interval_minutes,
+        )
+        return []
+
+    log.info(
+        "Scanning %d pairs (quote filter=%s)...",
+        len(pairs),
+        QUOTE_FILTER,
+    )
+
+    hits = []
+    unexpected_errors = 0
+
+    for index, (pair, wsname) in enumerate(pairs.items(), start=1):
+        try:
+            result = evaluate_volume_price_pair(
+                pair,
+                wsname,
+                interval_minutes,
+                state,
+                error_sink=api_errors,
+            )
+
+            if result:
+                hits.append(result)
+                log.info(
+                    "HIT: %s %s volume %.1fx, price %+.2f%% (%s)",
+                    result["pair"],
+                    result["direction"],
+                    result["volume_multiple"],
+                    result["price_change_pct"],
+                    label,
+                )
+        except Exception as exc:
+            unexpected_errors += 1
+            message = f"Skipping {pair}: {exc}"
+            log.exception(message)
+            api_errors.append(message)
+
+        time.sleep(REQUEST_DELAY_SEC)
+
+        if index % 50 == 0:
+            log.info(
+                "...%d/%d scanned (%d hit(s), %d unexpected error(s))",
+                index,
+                len(pairs),
+                len(hits),
+                unexpected_errors,
+            )
+
+    log.info(
+        "=== Volume-spike scan complete: %d pairs, %d hit(s), "
+        "%d unexpected error(s), %d API issue(s) ===",
+        len(pairs),
+        len(hits),
+        unexpected_errors,
+        len(api_errors),
+    )
+
+    if len(api_errors) >= API_ERROR_ALERT_THRESHOLD:
+        send_error_alert(
+            "Multiple Kraken API requests failed during the scan.",
+            context=(
+                f"{len(api_errors)} issue(s) recorded; "
+                f"first issue: {api_errors[0]}"
+            ),
+            interval_minutes=interval_minutes,
+        )
+
+    if hits:
+        hits.sort(key=lambda entry: entry["volume_multiple"], reverse=True)
+        send_volume_price_alert(hits, interval_minutes)
+
+        for hit in hits:
+            state[hit["pair_key"]] = hit["alert_epoch"]
+        save_state(state, VOLUME_ALERT_STATE_FILE)
+    else:
+        log.info("No volume-spike hits this scan.")
+
+    return hits
+
+
+def run_volume_price_scan(interval_minutes=None):
+    interval_minutes = (
+        interval_minutes or get_interval_minutes(DEFAULT_INTERVAL_MINUTES)
+    )
+    scan_once_volume_price(interval_minutes)
+
+
 def run_crypto_scan(
     interval_minutes=None,
-    loop=False,
     require_next_candle_confirmation=False,
 ):
     interval_minutes = (
         interval_minutes or get_interval_minutes(DEFAULT_INTERVAL_MINUTES)
     )
-
-    if not loop:
-        scan_once(
-            interval_minutes,
-            require_next_candle_confirmation=require_next_candle_confirmation,
-        )
-        return
-
-    log.info(
-        "Starting boundary-aligned loop (%s candles). Ctrl+C to stop.",
-        format_interval(interval_minutes),
+    scan_once(
+        interval_minutes,
+        require_next_candle_confirmation=require_next_candle_confirmation,
     )
-
-    while True:
-        try:
-            sleep_for = seconds_until_next_candle_scan(interval_minutes)
-            next_scan = datetime.fromtimestamp(
-                time.time() + sleep_for,
-                tz=timezone.utc,
-            )
-            log.info(
-                "Next scan at %s (sleeping %.1f minutes)",
-                next_scan.strftime("%Y-%m-%d %H:%M:%S UTC"),
-                sleep_for / 60.0,
-            )
-            time.sleep(sleep_for)
-
-            scan_once(
-                interval_minutes,
-                require_next_candle_confirmation=(
-                    require_next_candle_confirmation
-                ),
-            )
-        except KeyboardInterrupt:
-            log.info("Stopped by user.")
-            return
-        except Exception as exc:
-            log.exception("Scan failed: %s", exc)
-            time.sleep(30)
 
 
 def main():
@@ -949,11 +1181,6 @@ def main():
             "Kraken closed-candle breakout alert bot with ATR, robust volume, "
             "liquidity, and optional next-candle confirmation"
         )
-    )
-    parser.add_argument(
-        "--loop",
-        action="store_true",
-        help="Run continuously and align each scan to candle-close boundaries",
     )
     parser.add_argument(
         "--interval",
@@ -973,6 +1200,17 @@ def main():
             "This reduces false breakouts but delays alerts by one candle."
         ),
     )
+    parser.add_argument(
+        "--mode",
+        choices=["breakout", "volume"],
+        default="breakout",
+        help=(
+            "'breakout' runs the ATR/candle-quality breakout scan (default). "
+            "'volume' runs the simpler volume-spike scan: volume >= "
+            f"{VOLUME_SPIKE_MULTIPLE:.1f}x median and price move >= "
+            f"{PRICE_CHANGE_ALERT_PCT:.1f}% on the closed candle."
+        ),
+    )
     args = parser.parse_args()
 
     if args.interval not in VALID_INTERVALS:
@@ -983,11 +1221,13 @@ def main():
         )
         sys.exit(1)
 
-    run_crypto_scan(
-        interval_minutes=args.interval,
-        loop=args.loop,
-        require_next_candle_confirmation=args.confirm_next_candle,
-    )
+    if args.mode == "volume":
+        run_volume_price_scan(interval_minutes=args.interval)
+    else:
+        run_crypto_scan(
+            interval_minutes=args.interval,
+            require_next_candle_confirmation=args.confirm_next_candle,
+        )
 
 
 if __name__ == "__main__":

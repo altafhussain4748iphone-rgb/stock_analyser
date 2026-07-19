@@ -62,3 +62,9 @@ variable "max_retries" {
   type    = number
   default = 1
 }
+
+variable "parallelism" {
+  description = "Max number of task instances Cloud Run may run in parallel for a single execution."
+  type        = number
+  default     = 1
+}

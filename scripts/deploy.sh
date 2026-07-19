@@ -12,6 +12,14 @@
 #   scripts/deploy.sh              # deploy every job in ALL_JOBS
 #   scripts/deploy.sh crypto       # deploy just analyser-crypto
 #   scripts/deploy.sh crypto stocks
+#   scripts/deploy.sh --infra      # also run `terraform apply` after deploying
+#
+# --infra runs the image deploy first, then `terraform apply` from terraform/
+# (still interactive -- you still see the plan and type yes). That's the
+# right order when only code + existing infra settings changed. If you added
+# a brand-new Cloud Run job in terraform/jobs.tf, run `terraform apply`
+# manually first instead (the job must exist before this script can update
+# it), then this script.
 set -euo pipefail
 
 PROJECT_ID="${PROJECT_ID:-financial-analyser-502901}"
@@ -21,10 +29,20 @@ IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/analyser"
 
 # Keep this in sync with the `name` of each `module "..._analyser"` block in
 # terraform/jobs.tf.
-ALL_JOBS=(crypto)
+ALL_JOBS=(crypto crypto-volume)
 
-if [[ $# -gt 0 ]]; then
-  JOBS=("$@")
+WITH_INFRA=0
+ARGS=()
+for arg in "$@"; do
+  if [[ "$arg" == "--infra" ]]; then
+    WITH_INFRA=1
+  else
+    ARGS+=("$arg")
+  fi
+done
+
+if [[ ${#ARGS[@]} -gt 0 ]]; then
+  JOBS=("${ARGS[@]}")
 else
   JOBS=("${ALL_JOBS[@]}")
 fi
@@ -49,6 +67,11 @@ for job in "${JOBS[@]}"; do
     --region="${REGION}" \
     --image="${IMAGE}:${TAG}"
 done
+
+if [[ "$WITH_INFRA" -eq 1 ]]; then
+  echo "==> Running terraform apply"
+  terraform -chdir="${REPO_ROOT}/terraform" apply
+fi
 
 echo "==> Done. Run one now to test:"
 for job in "${JOBS[@]}"; do

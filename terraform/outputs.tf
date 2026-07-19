@@ -5,3 +5,7 @@ output "artifact_registry_repo" {
 output "crypto_job_logs_url" {
   value = module.crypto_analyser.logs_url
 }
+
+output "crypto_volume_job_logs_url" {
+  value = module.crypto_volume_analyser.logs_url
+}

@@ -41,7 +41,11 @@ After changing code:
 ```
 Push to GitHub whenever you like (`git push`) — it's just for code history/backup and doesn't trigger anything on GCP.
 
-If you change `terraform/*.tf` (new job, new schedule, new secret, etc.), run `terraform apply` from `terraform/` as well.
+If you change `terraform/*.tf` (new job, new schedule, new secret, etc.), run `terraform apply` from `terraform/` as well, or pass `--infra` to deploy both in one command:
+```bash
+./scripts/deploy.sh --infra
+```
+This builds/pushes the image and updates the job(s) first, then runs `terraform apply` (still interactive — you'll see the plan and confirm). Exception: if you added a brand-new Cloud Run job, run `terraform apply` manually first (the job must exist before `deploy.sh` can update it).
 
 ## Extending to a new script
 To schedule another script (e.g. once `technical_analysis/stocks/alerts.py` is filled in):
