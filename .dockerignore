@@ -1,0 +1,12 @@
+.venv
+env
+.git
+.github
+.pytest_cache
+tests
+terraform
+*.pyc
+__pycache__
+.env
+google_credentials.json
+README.md

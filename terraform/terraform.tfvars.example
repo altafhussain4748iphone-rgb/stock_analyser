@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars (gitignored) and fill in real values, or supply
+# these as TF_VAR_* environment variables instead. Never commit real secrets.
+
+smtp_user  = "you@gmail.com"
+smtp_pass  = "app-password"
+email_from = "you@gmail.com"
+email_to   = "alerts-recipient@example.com"
+
+# Only needed if you want to override the defaults in variables.tf:
+# project_id = "financial-analyser-502901"
+# region     = "us-central1"

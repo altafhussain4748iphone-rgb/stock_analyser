@@ -1,0 +1,38 @@
+# Runs automatically via the Cloud Build trigger defined in terraform/cloudbuild.tf
+# on every push to main. Builds the shared analyser image, pushes it to
+# Artifact Registry, then repoints each Cloud Run Job at the new image.
+#
+# To add a new script (e.g. "stocks"): once its Cloud Run Job exists
+# (see terraform/jobs.tf), add another `gcloud run jobs update` step below.
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - build
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/analyser:$SHORT_SHA"
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/analyser:latest"
+      - .
+
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - push
+      - "--all-tags"
+      - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/analyser"
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: gcloud
+    args:
+      - run
+      - jobs
+      - update
+      - analyser-crypto
+      - "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/analyser:$SHORT_SHA"
+      - "--region=${_REGION}"
+
+images:
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/analyser:$SHORT_SHA"
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/analyser:latest"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
