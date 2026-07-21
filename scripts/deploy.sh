@@ -29,7 +29,7 @@ IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/analyser"
 
 # Keep this in sync with the `name` of each `module "..._analyser"` block in
 # terraform/jobs.tf.
-ALL_JOBS=(crypto crypto-volume)
+ALL_JOBS=(crypto)
 
 WITH_INFRA=0
 ARGS=()

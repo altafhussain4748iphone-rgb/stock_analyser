@@ -6,6 +6,11 @@ resource "google_cloud_run_v2_job" "this" {
   name     = "analyser-${var.name}"
   location = var.region
 
+  # These are stateless, terraform-managed batch jobs recreated from this
+  # config -- no reason to block `terraform destroy`/removal the way you
+  # would for a stateful resource.
+  deletion_protection = false
+
   template {
     parallelism = var.parallelism
 

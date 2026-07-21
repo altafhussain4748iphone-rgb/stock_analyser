@@ -1,4 +1,3 @@
-import importlib
 import os
 import unittest
 from datetime import datetime, timezone
@@ -8,33 +7,76 @@ from technical_analysis.crypto import alerts as ca
 from technical_analysis.common import emailing
 
 
+def _breakout_hit(**overrides):
+    hit = {
+        "pair": "BTC/USD",
+        "pair_key": "XBTUSD",
+        "direction": "UP",
+        "price_change_pct": 3.5,
+        "close": 112.0,
+        "breakout_level": 110.0,
+        "breakout_strength_atr": 1.2,
+        "body_ratio": 0.7,
+        "body_atr": 0.9,
+        "close_extreme_ratio": 0.9,
+        "quote_volume": 150_000.0,
+        "volume_multiple": 4.2,
+        "volume_robust_z": 5.0,
+        "signal_time": datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc),
+        "signal_epoch": 1,
+        "confirmation_time": None,
+        "confirmation_close": None,
+        "confirmed_by_next_candle": False,
+        "alert_epoch": 1,
+    }
+    hit.update(overrides)
+    return hit
+
+
+def _volume_surge_hit(**overrides):
+    hit = {
+        "pair": "ETH/USD",
+        "pair_key": "ETHUSD",
+        "direction": "UP",
+        "price_change_pct": 2.0,
+        "close": 3200.0,
+        "quote_volume": 90_000.0,
+        "volume_multiple": 3.2,
+        "signal_time": datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc),
+        "signal_epoch": 1,
+        "alert_epoch": 1,
+    }
+    hit.update(overrides)
+    return hit
+
+
 class EmailFormattingTests(unittest.TestCase):
-    def test_crypto_alert_email_is_well_formatted(self):
-        hits = [
-            {
-                "pair": "BTC/USD",
-                "direction": "UP",
-                "price_change_pct": 3.5,
-                "body_ratio": 0.7,
-                "range_low": 100.0,
-                "range_high": 110.0,
-                "volume": 1500.0,
-                "volume_ratio": 4.2,
-                "close": 112.0,
-                "candle_time": datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc),
-            }
-        ]
+    def test_combined_email_includes_only_sections_with_hits(self):
+        hits_by_analysis = {"breakout": [_breakout_hit()], "volume_surge": []}
 
-        subject, body = ca.build_email_content("crypto_alert", hits=hits, interval_minutes=15)
+        subject, body = ca.build_combined_email(hits_by_analysis, 15, False)
 
-        self.assertIn("Kraken Crypto Alert", subject)
+        self.assertIn("1 confirmed breakouts", subject)
         self.assertIn("BTC/USD", body)
         self.assertIn("UP breakout", body)
-        self.assertIn("Summary", body)
+        self.assertNotIn("Volume Surge Alerts", body)
+
+    def test_combined_email_renders_both_sections(self):
+        hits_by_analysis = {
+            "breakout": [_breakout_hit()],
+            "volume_surge": [_volume_surge_hit()],
+        }
+
+        subject, body = ca.build_combined_email(hits_by_analysis, 15, False)
+
+        self.assertIn("Confirmed Breakouts", body)
+        self.assertIn("Volume Surge Alerts", body)
+        self.assertIn("BTC/USD", body)
+        self.assertIn("ETH/USD", body)
 
     def test_error_alert_email_is_well_formatted(self):
-        subject, body = ca.build_email_content(
-            "error",
+        subject, body = ca.build_error_email(
+            15,
             error_message="Kraken OHLC request failed",
             context="pair=BTC/USD",
         )
@@ -71,19 +113,8 @@ class EmailFormattingTests(unittest.TestCase):
             smtp_ssl_cls.side_effect = Exception("boom")
             emailing.send_email_message("subject", "body")
 
-    def test_crypto_alert_send_uses_shared_smtp_config(self):
-        dummy_hit = {
-            "pair": "BTC/USD",
-            "direction": "UP",
-            "price_change_pct": 3.5,
-            "body_ratio": 0.7,
-            "range_low": 100.0,
-            "range_high": 110.0,
-            "volume": 1500.0,
-            "volume_ratio": 4.2,
-            "close": 112.0,
-            "candle_time": datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc),
-        }
+    def test_combined_alert_send_uses_shared_smtp_config(self):
+        hits_by_analysis = {"breakout": [_breakout_hit()], "volume_surge": []}
 
         with mock.patch.object(emailing, "get_smtp_settings", return_value={
             "host": "smtp.example.com",
@@ -96,7 +127,7 @@ class EmailFormattingTests(unittest.TestCase):
             smtp_cls.return_value.__enter__.return_value.starttls.return_value = None
             smtp_cls.return_value.__enter__.return_value.login.return_value = None
             smtp_cls.return_value.__enter__.return_value.sendmail.return_value = None
-            ca.send_crypto_alert([dummy_hit], 15)
+            ca.send_combined_alert(hits_by_analysis, 15)
             self.assertTrue(smtp_cls.called)
 
 

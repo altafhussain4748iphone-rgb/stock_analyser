@@ -75,8 +75,8 @@ CONFIRM_RETEST_TOLERANCE_ATR = 0.25
 # -----------------------------------------------------------------------------
 # Volume-spike settings
 #
-# A simpler, separate job: alert on any pair whose latest closed candle shows
-# a volume spike and a large price move, without the breakout/candle-quality
+# A simpler check: alert on any pair whose latest closed candle shows a
+# volume spike and a large price move, without the breakout/candle-quality
 # filters above. Liquidity filters are still reused so alerts stay on
 # tradable pairs.
 # -----------------------------------------------------------------------------
@@ -99,15 +99,6 @@ ALERT_STATE_FILE = get_env(
         "..",
         "..",
         "kraken_alert_state.json",
-    ),
-)
-VOLUME_ALERT_STATE_FILE = get_env(
-    "VOLUME_ALERT_STATE_FILE",
-    os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "..",
-        "..",
-        "kraken_volume_alert_state.json",
     ),
 )
 
@@ -384,6 +375,10 @@ def get_candles(pair, count, interval_minutes, error_sink=None):
 
 # -----------------------------------------------------------------------------
 # Breakout evaluation
+#
+# Pure functions of already-fetched candle data, so they can run against a
+# single Kraken fetch shared with any other analysis (see "Analysis registry"
+# below).
 # -----------------------------------------------------------------------------
 
 
@@ -586,48 +581,28 @@ def next_candle_confirms(hit, signal_candle, confirmation_candle, interval_minut
     return True
 
 
-def evaluate_pair(
+def _breakout_closed_candles_needed(require_next_candle_confirmation):
+    history_needed = max(BREAKOUT_LOOKBACK, VOLUME_LOOKBACK, ATR_PERIOD + 1)
+    extra_closed_candles = 2 if require_next_candle_confirmation else 1
+    return history_needed + extra_closed_candles
+
+
+def run_breakout_analysis(
     pair,
     wsname,
+    closed_candles,
     interval_minutes,
-    state,
     require_next_candle_confirmation=False,
-    error_sink=None,
 ):
-    history_needed = max(
-        BREAKOUT_LOOKBACK,
-        VOLUME_LOOKBACK,
-        ATR_PERIOD + 1,
-    )
-
-    # Extra candles:
-    #   1 = Kraken's currently forming candle, which must never be evaluated.
-    #   1 = the closed signal candle.
-    #   1 more = optional next closed candle used for confirmation.
-    extra_closed_candles = 2 if require_next_candle_confirmation else 1
-    requested_count = history_needed + extra_closed_candles + 1
-
-    candles = get_candles(
-        pair,
-        requested_count,
-        interval_minutes,
-        error_sink=error_sink,
-    )
-
-    if not candles or len(candles) < requested_count:
+    needed = _breakout_closed_candles_needed(require_next_candle_confirmation)
+    if len(closed_candles) < needed:
         return None
 
-    # Kraken's final OHLC item is the currently forming candle.
-    closed_candles = candles[:-1]
-
+    tail = closed_candles[-needed:]
     if require_next_candle_confirmation:
-        history = closed_candles[:-2]
-        signal_candle = closed_candles[-2]
-        confirmation_candle = closed_candles[-1]
+        history, signal_candle, confirmation_candle = tail[:-2], tail[-2], tail[-1]
     else:
-        history = closed_candles[:-1]
-        signal_candle = closed_candles[-1]
-        confirmation_candle = None
+        history, signal_candle, confirmation_candle = tail[:-1], tail[-1], None
 
     hit = evaluate_signal_candle(pair, wsname, history, signal_candle)
     if hit is None:
@@ -641,19 +616,52 @@ def evaluate_pair(
             interval_minutes,
         ):
             return None
-        alert_epoch = confirmation_candle["time"]
+        hit["alert_epoch"] = confirmation_candle["time"]
     else:
-        alert_epoch = signal_candle["time"]
+        hit["alert_epoch"] = signal_candle["time"]
 
-    if in_cooldown(state, pair, alert_epoch, interval_minutes):
-        log.debug(
-            "%s: passed all filters but is still in cooldown",
-            wsname or pair,
-        )
-        return None
-
-    hit["alert_epoch"] = alert_epoch
     return hit
+
+
+def log_breakout_hit(hit, label):
+    log.info(
+        "HIT[breakout]: %s %s breakout, volume %.1fx (z=%.1f), "
+        "price %+.2f%%, body %.2f ATR, breakout %.2f ATR (%s)",
+        hit["pair"],
+        hit["direction"],
+        hit["volume_multiple"],
+        hit["volume_robust_z"],
+        hit["price_change_pct"],
+        hit["body_atr"],
+        hit["breakout_strength_atr"],
+        label,
+    )
+
+
+def render_breakout_item(hit):
+    pair = html.escape(str(hit["pair"]))
+    signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M UTC")
+    confirmation_text = ""
+
+    if hit["confirmed_by_next_candle"]:
+        confirmation_time = hit["confirmation_time"].strftime("%Y-%m-%d %H:%M UTC")
+        confirmation_text = (
+            f" · confirmed {confirmation_time}"
+            f" at {hit['confirmation_close']:.8g}"
+        )
+
+    return (
+        f"<li><strong>{pair}</strong> {hit['direction']} breakout"
+        f" · move {hit['price_change_pct']:+.2f}%"
+        f" · close {hit['close']:.8g}"
+        f" · level {hit['breakout_level']:.8g}"
+        f" · breakout {hit['breakout_strength_atr']:.2f} ATR"
+        f" · body {hit['body_ratio'] * 100:.0f}%/{hit['body_atr']:.2f} ATR"
+        f" · close-at-extreme {hit['close_extreme_ratio'] * 100:.0f}%"
+        f" · quote volume ${hit['quote_volume']:,.0f}"
+        f" ({hit['volume_multiple']:.1f}x median, z={hit['volume_robust_z']:.1f})"
+        f" · signal {signal_time}{confirmation_text}</li>"
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -737,47 +745,111 @@ def evaluate_volume_price_candle(pair, wsname, history, signal_candle):
     }
 
 
-def evaluate_volume_price_pair(
+def _volume_surge_closed_candles_needed():
+    return VOLUME_LOOKBACK + 1
+
+
+def run_volume_surge_analysis(
     pair,
     wsname,
+    closed_candles,
     interval_minutes,
-    state,
-    error_sink=None,
+    require_next_candle_confirmation=False,
 ):
-    # Extra candles: 1 = Kraken's currently forming candle (never evaluated),
-    # 1 = the closed signal candle.
-    requested_count = VOLUME_LOOKBACK + 2
-
-    candles = get_candles(
-        pair,
-        requested_count,
-        interval_minutes,
-        error_sink=error_sink,
-    )
-
-    if not candles or len(candles) < requested_count:
+    needed = _volume_surge_closed_candles_needed()
+    if len(closed_candles) < needed:
         return None
 
-    # Kraken's final OHLC item is the currently forming candle.
-    closed_candles = candles[:-1]
-    history = closed_candles[:-1]
-    signal_candle = closed_candles[-1]
+    tail = closed_candles[-needed:]
+    history, signal_candle = tail[:-1], tail[-1]
 
     hit = evaluate_volume_price_candle(pair, wsname, history, signal_candle)
     if hit is None:
         return None
 
-    alert_epoch = signal_candle["time"]
-
-    if in_cooldown(state, pair, alert_epoch, interval_minutes):
-        log.debug(
-            "%s: passed volume/price filters but is still in cooldown",
-            wsname or pair,
-        )
-        return None
-
-    hit["alert_epoch"] = alert_epoch
+    hit["alert_epoch"] = signal_candle["time"]
     return hit
+
+
+def log_volume_surge_hit(hit, label):
+    log.info(
+        "HIT[volume_surge]: %s %s volume %.1fx, price %+.2f%% (%s)",
+        hit["pair"],
+        hit["direction"],
+        hit["volume_multiple"],
+        hit["price_change_pct"],
+        label,
+    )
+
+
+def render_volume_surge_item(hit):
+    pair = html.escape(str(hit["pair"]))
+    signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M UTC")
+
+    return (
+        f"<li><strong>{pair}</strong> {hit['direction']}"
+        f" · move {hit['price_change_pct']:+.2f}%"
+        f" · close {hit['close']:.8g}"
+        f" · quote volume ${hit['quote_volume']:,.0f}"
+        f" ({hit['volume_multiple']:.1f}x median)"
+        f" · signal {signal_time}</li>"
+    )
+
+
+# -----------------------------------------------------------------------------
+# Analysis registry
+#
+# Each entry is a self-contained analysis that runs against the *same*
+# Kraken candle fetch for a pair. To add a new analysis (e.g. RSI divergence,
+# moving-average cross):
+#   1. Write an `evaluate_*_candle(pair, wsname, history, signal_candle)`
+#      function returning a hit dict (with at least "pair", "pair_key",
+#      "direction", "price_change_pct", "signal_time", "alert_epoch") or None.
+#   2. Write a `run_*_analysis(pair, wsname, closed_candles, interval_minutes,
+#      require_next_candle_confirmation)` wrapper that slices `closed_candles`
+#      to the history/signal candle it needs and calls the evaluator.
+#   3. Write `log_*_hit(hit, label)` and `render_*_item(hit)` for logging and
+#      the email section.
+#   4. Append a new entry below. No other code needs to change: the scanner
+#      loop, cooldown state, and combined email all iterate this list.
+# -----------------------------------------------------------------------------
+
+ANALYSES = [
+    {
+        "key": "breakout",
+        "section_title": "Confirmed Breakouts",
+        "run": run_breakout_analysis,
+        "sort_key": lambda hit: (hit["volume_robust_z"], hit["breakout_strength_atr"]),
+        "log_hit": log_breakout_hit,
+        "render_item": render_breakout_item,
+        "section_intro": lambda confirm_label: (
+            "<p>Signals passed range, ATR, candle-quality, robust-volume, and "
+            f"liquidity filters ({html.escape(confirm_label)}).</p>"
+        ),
+    },
+    {
+        "key": "volume_surge",
+        "section_title": "Volume Surge Alerts",
+        "run": run_volume_surge_analysis,
+        "sort_key": lambda hit: hit["volume_multiple"],
+        "log_hit": log_volume_surge_hit,
+        "render_item": render_volume_surge_item,
+        "section_intro": lambda _confirm_label: (
+            f"<p>Signals passed volume &gt;= {VOLUME_SPIKE_MULTIPLE:.1f}x median and "
+            f"price move &gt;= {PRICE_CHANGE_ALERT_PCT:.1f}% on the closed candle, "
+            "plus liquidity filters.</p>"
+        ),
+    },
+]
+
+
+def _max_requested_candle_count(require_next_candle_confirmation):
+    closed_needed = max(
+        _breakout_closed_candles_needed(require_next_candle_confirmation),
+        _volume_surge_closed_candles_needed(),
+    )
+    # +1 for Kraken's currently forming candle, which is never evaluated.
+    return closed_needed + 1
 
 
 # -----------------------------------------------------------------------------
@@ -785,95 +857,40 @@ def evaluate_volume_price_pair(
 # -----------------------------------------------------------------------------
 
 
-def build_email_content(
-    alert_type,
-    hits=None,
-    interval_minutes=None,
-    error_message=None,
-    context=None,
-    require_next_candle_confirmation=False,
-):
+def build_combined_email(hits_by_analysis, interval_minutes, require_next_candle_confirmation):
+    label = format_interval(interval_minutes)
+    confirm_label = (
+        "next-candle confirmation required"
+        if require_next_candle_confirmation
+        else "closed signal candle"
+    )
+
+    subject_parts = []
+    lines = [
+        "<html><body>",
+        "<h2>Kraken Crypto Alerts</h2>",
+        f"<p><strong>Interval:</strong> {html.escape(label)}</p>",
+    ]
+
+    for spec in ANALYSES:
+        hits = hits_by_analysis.get(spec["key"]) or []
+        if not hits:
+            continue
+
+        subject_parts.append(f"{len(hits)} {spec['section_title'].lower()}")
+        lines.append(f"<h3>{html.escape(spec['section_title'])} ({len(hits)})</h3>")
+        lines.append(spec["section_intro"](confirm_label))
+        lines.append("<ul>")
+        lines.extend(spec["render_item"](hit) for hit in hits)
+        lines.append("</ul>")
+
+    lines.extend(["</body></html>"])
+    subject = f"Kraken Alerts: {', '.join(subject_parts)} ({label})"
+    return subject, "".join(lines)
+
+
+def build_error_email(interval_minutes, error_message=None, context=None):
     label = format_interval(interval_minutes) if interval_minutes else "unknown"
-
-    if alert_type == "crypto_alert":
-        hits = list(hits or [])
-        confirmation_label = (
-            "next-candle confirmation required"
-            if require_next_candle_confirmation
-            else "closed signal candle"
-        )
-
-        subject = f"Kraken Confirmed Breakouts: {len(hits)} pair(s) ({label})"
-        lines = [
-            "<html><body>",
-            "<h2>Kraken Confirmed Breakouts</h2>",
-            f"<p><strong>Interval:</strong> {html.escape(label)}</p>",
-            f"<p><strong>Mode:</strong> {html.escape(confirmation_label)}</p>",
-            "<p>Signals passed range, ATR, candle-quality, robust-volume, "
-            "and liquidity filters.</p>",
-            "<ul>",
-        ]
-
-        for hit in hits:
-            pair = html.escape(str(hit["pair"]))
-            signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M UTC")
-            confirmation_text = ""
-
-            if hit["confirmed_by_next_candle"]:
-                confirmation_time = hit["confirmation_time"].strftime(
-                    "%Y-%m-%d %H:%M UTC"
-                )
-                confirmation_text = (
-                    f" · confirmed {confirmation_time}"
-                    f" at {hit['confirmation_close']:.8g}"
-                )
-
-            lines.append(
-                f"<li><strong>{pair}</strong> {hit['direction']} breakout"
-                f" · move {hit['price_change_pct']:+.2f}%"
-                f" · close {hit['close']:.8g}"
-                f" · level {hit['breakout_level']:.8g}"
-                f" · breakout {hit['breakout_strength_atr']:.2f} ATR"
-                f" · body {hit['body_ratio'] * 100:.0f}%/{hit['body_atr']:.2f} ATR"
-                f" · close-at-extreme {hit['close_extreme_ratio'] * 100:.0f}%"
-                f" · quote volume ${hit['quote_volume']:,.0f}"
-                f" ({hit['volume_multiple']:.1f}x median, z={hit['volume_robust_z']:.1f})"
-                f" · signal {signal_time}{confirmation_text}</li>"
-            )
-
-        lines.extend(["</ul>", "</body></html>"])
-        return subject, "".join(lines)
-
-    if alert_type == "crypto_volume_alert":
-        hits = list(hits or [])
-
-        subject = f"Kraken Volume Spike Alerts: {len(hits)} pair(s) ({label})"
-        lines = [
-            "<html><body>",
-            "<h2>Kraken Volume Spike Alerts</h2>",
-            f"<p><strong>Interval:</strong> {html.escape(label)}</p>",
-            f"<p>Signals passed volume &gt;= {VOLUME_SPIKE_MULTIPLE:.1f}x median and "
-            f"price move &gt;= {PRICE_CHANGE_ALERT_PCT:.1f}% on the closed signal "
-            "candle, plus liquidity filters.</p>",
-            "<ul>",
-        ]
-
-        for hit in hits:
-            pair = html.escape(str(hit["pair"]))
-            signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M UTC")
-
-            lines.append(
-                f"<li><strong>{pair}</strong> {hit['direction']}"
-                f" · move {hit['price_change_pct']:+.2f}%"
-                f" · close {hit['close']:.8g}"
-                f" · quote volume ${hit['quote_volume']:,.0f}"
-                f" ({hit['volume_multiple']:.1f}x median)"
-                f" · signal {signal_time}</li>"
-            )
-
-        lines.extend(["</ul>", "</body></html>"])
-        return subject, "".join(lines)
-
     subject = "Kraken API Error"
     details = [
         "<html><body>",
@@ -898,33 +915,18 @@ def build_email_content(
     return subject, "".join(details)
 
 
-def send_crypto_alert(
-    hits,
-    interval_minutes,
-    require_next_candle_confirmation=False,
-):
-    subject, body = build_email_content(
-        "crypto_alert",
-        hits=hits,
-        interval_minutes=interval_minutes,
-        require_next_candle_confirmation=require_next_candle_confirmation,
-    )
-    send_html_email(subject, body, html=True)
-
-
-def send_volume_price_alert(hits, interval_minutes):
-    subject, body = build_email_content(
-        "crypto_volume_alert",
-        hits=hits,
-        interval_minutes=interval_minutes,
+def send_combined_alert(hits_by_analysis, interval_minutes, require_next_candle_confirmation=False):
+    subject, body = build_combined_email(
+        hits_by_analysis,
+        interval_minutes,
+        require_next_candle_confirmation,
     )
     send_html_email(subject, body, html=True)
 
 
 def send_error_alert(error_message, context=None, interval_minutes=None):
-    subject, body = build_email_content(
-        "error",
-        interval_minutes=interval_minutes,
+    subject, body = build_error_email(
+        interval_minutes,
         error_message=error_message,
         context=context,
     )
@@ -944,12 +946,16 @@ def scan_once(interval_minutes, require_next_candle_confirmation=False):
         else "closed-candle confirmation"
     )
     log.info(
-        "=== Starting scan (interval=%s, mode=%s) ===",
+        "=== Starting scan (interval=%s, mode=%s, analyses=%s) ===",
         label,
         mode,
+        [spec["key"] for spec in ANALYSES],
     )
 
     state = load_state()
+    for spec in ANALYSES:
+        state.setdefault(spec["key"], {})
+
     api_errors = []
 
     try:
@@ -961,7 +967,7 @@ def scan_once(interval_minutes, require_next_candle_confirmation=False):
             context="Fetching tradable pairs",
             interval_minutes=interval_minutes,
         )
-        return []
+        return {}
 
     log.info(
         "Scanning %d pairs (quote filter=%s)...",
@@ -969,34 +975,51 @@ def scan_once(interval_minutes, require_next_candle_confirmation=False):
         QUOTE_FILTER,
     )
 
-    hits = []
+    hits_by_analysis = {spec["key"]: [] for spec in ANALYSES}
     unexpected_errors = 0
+    requested_count = _max_requested_candle_count(require_next_candle_confirmation)
 
     for index, (pair, wsname) in enumerate(pairs.items(), start=1):
         try:
-            result = evaluate_pair(
+            # One Kraken OHLC fetch per pair, shared across every analysis.
+            candles = get_candles(
                 pair,
-                wsname,
+                requested_count,
                 interval_minutes,
-                state,
-                require_next_candle_confirmation=require_next_candle_confirmation,
                 error_sink=api_errors,
             )
 
-            if result:
-                hits.append(result)
-                log.info(
-                    "HIT: %s %s breakout, volume %.1fx (z=%.1f), "
-                    "price %+.2f%%, body %.2f ATR, breakout %.2f ATR (%s)",
-                    result["pair"],
-                    result["direction"],
-                    result["volume_multiple"],
-                    result["volume_robust_z"],
-                    result["price_change_pct"],
-                    result["body_atr"],
-                    result["breakout_strength_atr"],
-                    label,
-                )
+            if candles:
+                # Kraken's final OHLC item is the currently forming candle.
+                closed_candles = candles[:-1]
+
+                for spec in ANALYSES:
+                    result = spec["run"](
+                        pair,
+                        wsname,
+                        closed_candles,
+                        interval_minutes,
+                        require_next_candle_confirmation=require_next_candle_confirmation,
+                    )
+
+                    if result is None:
+                        continue
+
+                    if in_cooldown(
+                        state[spec["key"]],
+                        pair,
+                        result["alert_epoch"],
+                        interval_minutes,
+                    ):
+                        log.debug(
+                            "%s: %s passed filters but is still in cooldown",
+                            wsname or pair,
+                            spec["key"],
+                        )
+                        continue
+
+                    hits_by_analysis[spec["key"]].append(result)
+                    spec["log_hit"](result, label)
         except Exception as exc:
             unexpected_errors += 1
             message = f"Skipping {pair}: {exc}"
@@ -1006,19 +1029,22 @@ def scan_once(interval_minutes, require_next_candle_confirmation=False):
         time.sleep(REQUEST_DELAY_SEC)
 
         if index % 50 == 0:
+            total_hits_so_far = sum(len(hits) for hits in hits_by_analysis.values())
             log.info(
                 "...%d/%d scanned (%d hit(s), %d unexpected error(s))",
                 index,
                 len(pairs),
-                len(hits),
+                total_hits_so_far,
                 unexpected_errors,
             )
 
+    total_hits = sum(len(hits) for hits in hits_by_analysis.values())
     log.info(
-        "=== Scan complete: %d pairs, %d confirmed breakout(s), "
+        "=== Scan complete: %d pairs, %d hit(s) (%s), "
         "%d unexpected error(s), %d API issue(s) ===",
         len(pairs),
-        len(hits),
+        total_hits,
+        ", ".join(f"{spec['key']}={len(hits_by_analysis[spec['key']])}" for spec in ANALYSES),
         unexpected_errors,
         len(api_errors),
     )
@@ -1033,133 +1059,26 @@ def scan_once(interval_minutes, require_next_candle_confirmation=False):
             interval_minutes=interval_minutes,
         )
 
-    if hits:
-        hits.sort(
-            key=lambda entry: (
-                entry["volume_robust_z"],
-                entry["breakout_strength_atr"],
-            ),
-            reverse=True,
-        )
-        send_crypto_alert(
-            hits,
+    if total_hits:
+        for spec in ANALYSES:
+            hits = hits_by_analysis[spec["key"]]
+            if not hits:
+                continue
+
+            hits.sort(key=spec["sort_key"], reverse=True)
+            for hit in hits:
+                state[spec["key"]][hit["pair_key"]] = hit["alert_epoch"]
+
+        send_combined_alert(
+            hits_by_analysis,
             interval_minutes,
             require_next_candle_confirmation=require_next_candle_confirmation,
         )
-
-        for hit in hits:
-            state[hit["pair_key"]] = hit["alert_epoch"]
         save_state(state)
     else:
-        log.info("No confirmed breakouts this scan.")
+        log.info("No hits this scan.")
 
-    return hits
-
-
-def scan_once_volume_price(interval_minutes):
-    label = format_interval(interval_minutes)
-    log.info(
-        "=== Starting volume-spike scan (interval=%s) ===",
-        label,
-    )
-
-    state = load_state(VOLUME_ALERT_STATE_FILE)
-    api_errors = []
-
-    try:
-        pairs = get_tradable_pairs(error_sink=api_errors)
-    except Exception as exc:
-        log.error("Unable to fetch Kraken pairs: %s", exc)
-        send_error_alert(
-            str(exc),
-            context="Fetching tradable pairs",
-            interval_minutes=interval_minutes,
-        )
-        return []
-
-    log.info(
-        "Scanning %d pairs (quote filter=%s)...",
-        len(pairs),
-        QUOTE_FILTER,
-    )
-
-    hits = []
-    unexpected_errors = 0
-
-    for index, (pair, wsname) in enumerate(pairs.items(), start=1):
-        try:
-            result = evaluate_volume_price_pair(
-                pair,
-                wsname,
-                interval_minutes,
-                state,
-                error_sink=api_errors,
-            )
-
-            if result:
-                hits.append(result)
-                log.info(
-                    "HIT: %s %s volume %.1fx, price %+.2f%% (%s)",
-                    result["pair"],
-                    result["direction"],
-                    result["volume_multiple"],
-                    result["price_change_pct"],
-                    label,
-                )
-        except Exception as exc:
-            unexpected_errors += 1
-            message = f"Skipping {pair}: {exc}"
-            log.exception(message)
-            api_errors.append(message)
-
-        time.sleep(REQUEST_DELAY_SEC)
-
-        if index % 50 == 0:
-            log.info(
-                "...%d/%d scanned (%d hit(s), %d unexpected error(s))",
-                index,
-                len(pairs),
-                len(hits),
-                unexpected_errors,
-            )
-
-    log.info(
-        "=== Volume-spike scan complete: %d pairs, %d hit(s), "
-        "%d unexpected error(s), %d API issue(s) ===",
-        len(pairs),
-        len(hits),
-        unexpected_errors,
-        len(api_errors),
-    )
-
-    if len(api_errors) >= API_ERROR_ALERT_THRESHOLD:
-        send_error_alert(
-            "Multiple Kraken API requests failed during the scan.",
-            context=(
-                f"{len(api_errors)} issue(s) recorded; "
-                f"first issue: {api_errors[0]}"
-            ),
-            interval_minutes=interval_minutes,
-        )
-
-    if hits:
-        hits.sort(key=lambda entry: entry["volume_multiple"], reverse=True)
-        send_volume_price_alert(hits, interval_minutes)
-
-        for hit in hits:
-            state[hit["pair_key"]] = hit["alert_epoch"]
-        save_state(state, VOLUME_ALERT_STATE_FILE)
-    else:
-        log.info("No volume-spike hits this scan.")
-
-    return hits
-
-
-def run_volume_price_scan(interval_minutes=None):
-    interval_minutes = (
-        interval_minutes or get_interval_minutes(DEFAULT_INTERVAL_MINUTES)
-    )
-    scan_once_volume_price(interval_minutes)
+    return hits_by_analysis
 
 
 def run_crypto_scan(
@@ -1178,8 +1097,9 @@ def run_crypto_scan(
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Kraken closed-candle breakout alert bot with ATR, robust volume, "
-            "liquidity, and optional next-candle confirmation"
+            "Kraken closed-candle alert bot: breakout (ATR/robust-volume/"
+            "liquidity filters) and volume-surge analyses share a single "
+            "Kraken fetch and one combined email per scan."
         )
     )
     parser.add_argument(
@@ -1196,19 +1116,9 @@ def main():
         action="store_true",
         default=DEFAULT_REQUIRE_NEXT_CANDLE_CONFIRMATION,
         help=(
-            "Require the candle after the breakout to hold the broken level. "
-            "This reduces false breakouts but delays alerts by one candle."
-        ),
-    )
-    parser.add_argument(
-        "--mode",
-        choices=["breakout", "volume"],
-        default="breakout",
-        help=(
-            "'breakout' runs the ATR/candle-quality breakout scan (default). "
-            "'volume' runs the simpler volume-spike scan: volume >= "
-            f"{VOLUME_SPIKE_MULTIPLE:.1f}x median and price move >= "
-            f"{PRICE_CHANGE_ALERT_PCT:.1f}% on the closed candle."
+            "Require the candle after a breakout to hold the broken level. "
+            "This reduces false breakouts but delays breakout alerts by one "
+            "candle. Does not affect the volume-surge analysis."
         ),
     )
     args = parser.parse_args()
@@ -1221,13 +1131,10 @@ def main():
         )
         sys.exit(1)
 
-    if args.mode == "volume":
-        run_volume_price_scan(interval_minutes=args.interval)
-    else:
-        run_crypto_scan(
-            interval_minutes=args.interval,
-            require_next_candle_confirmation=args.confirm_next_candle,
-        )
+    run_crypto_scan(
+        interval_minutes=args.interval,
+        require_next_candle_confirmation=args.confirm_next_candle,
+    )
 
 
 if __name__ == "__main__":
