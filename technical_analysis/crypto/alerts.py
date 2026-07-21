@@ -86,6 +86,46 @@ PRICE_CHANGE_ALERT_PCT = 1.5
 
 
 # -----------------------------------------------------------------------------
+# EMA trend settings
+#
+# Two separate analyses built on the same 20/50 EMA pair:
+#   - "ema_cross": alert once the fast/slow EMA gap first pushes through a
+#     minimum ATR-relative separation in a given direction. A raw zero-cross
+#     has ~0 separation by definition, so this is a "confirmed" cross --
+#     often the same candle as the raw cross, sometimes a candle or two
+#     later once the move has some conviction -- rather than the instant the
+#     two EMAs are exactly equal, which would whipsaw constantly on a 15m
+#     chart.
+#   - "ema_trend_pullback": alert when price pulls back to the fast EMA
+#     *within* an established trend (defined by slow-EMA slope and EMA
+#     ordering) and closes back in the trend direction. Fewer, later signals
+#     than the raw cross, but each one already has trend context behind it.
+# Both reuse the liquidity filters from the breakout analysis so alerts stay
+# on tradable pairs, and warm up the EMA over EMA_WARMUP_CANDLES extra bars
+# before trusting it (an EMA seeded from a plain SMA is inaccurate at first).
+# -----------------------------------------------------------------------------
+
+EMA_FAST_PERIOD = 20
+EMA_SLOW_PERIOD = 50
+EMA_WARMUP_CANDLES = EMA_SLOW_PERIOD * 3
+
+# A cross/trend is only actionable once the EMAs are this far apart (in ATR),
+# otherwise they are tangled together and any "cross" is just noise.
+EMA_MIN_SEPARATION_ATR = 0.25
+
+# How many candles back to measure the slow EMA's slope for trend direction.
+EMA_TREND_LOOKBACK = 10
+
+# Minimum slow-EMA slope, in ATR per candle, to call the market "trending"
+# rather than flat.
+EMA_MIN_SLOPE_ATR = 0.05
+
+# How close the signal candle must dip toward the fast EMA to count as a
+# pullback touch, in ATR.
+EMA_PULLBACK_TOUCH_ATR = 0.35
+
+
+# -----------------------------------------------------------------------------
 # Application configuration and logging
 # -----------------------------------------------------------------------------
 
@@ -239,6 +279,25 @@ def calculate_atr(candles, period):
         return None
 
     return sum(true_ranges) / len(true_ranges)
+
+
+def calculate_ema_series(candles, period):
+    """Return an EMA series over `candles`, seeded with an SMA of the first
+    `period` closes. series[-1] is the EMA as of candles[-1], series[-2] as
+    of candles[-2], and so on -- callers only need the last one or two
+    values, so alignment to the *start* of `candles` does not matter.
+    """
+    if len(candles) < period:
+        return []
+
+    closes = [candle["close"] for candle in candles]
+    multiplier = 2 / (period + 1)
+    ema_values = [sum(closes[:period]) / period]
+
+    for close in closes[period:]:
+        ema_values.append((close - ema_values[-1]) * multiplier + ema_values[-1])
+
+    return ema_values
 
 
 # -----------------------------------------------------------------------------
@@ -797,6 +856,318 @@ def render_volume_surge_item(hit):
 
 
 # -----------------------------------------------------------------------------
+# EMA evaluation
+#
+# Both functions below share the same 20/50 EMA warm-up requirement (see
+# _ema_closed_candles_needed) but ask two different questions of it:
+#   - evaluate_ema_cross_candle: did the fast/slow EMA just cross?
+#   - evaluate_ema_trend_pullback_candle: is there an established trend, and
+#     did price just bounce off the fast EMA in that trend's direction?
+# -----------------------------------------------------------------------------
+
+
+def _ema_ready(closed_candles):
+    """Compute the fast/slow EMA series and ATR shared by both EMA analyses,
+    or None if there isn't enough warmed-up history yet."""
+    if len(closed_candles) < _ema_closed_candles_needed():
+        return None
+
+    fast_series = calculate_ema_series(closed_candles, EMA_FAST_PERIOD)
+    slow_series = calculate_ema_series(closed_candles, EMA_SLOW_PERIOD)
+    if len(fast_series) < 2 or len(slow_series) < 2:
+        return None
+
+    atr = calculate_atr(closed_candles, ATR_PERIOD)
+    if atr is None or atr <= 0:
+        return None
+
+    return fast_series, slow_series, atr
+
+
+def _liquidity_stats(closed_candles, signal_candle):
+    volume_window = closed_candles[-VOLUME_LOOKBACK:]
+    historical_quote_volumes = [
+        candle["volume"] * candle["vwap"] for candle in volume_window
+    ]
+    historical_trade_counts = [candle["count"] for candle in volume_window]
+    median_quote_volume = median(historical_quote_volumes)
+    median_trade_count = median(historical_trade_counts)
+
+    passes_liquidity = (
+        median_quote_volume >= MIN_MEDIAN_QUOTE_VOLUME
+        and median_trade_count >= MIN_MEDIAN_TRADE_COUNT
+        and signal_candle["count"] >= MIN_SIGNAL_TRADE_COUNT
+    )
+    return passes_liquidity
+
+
+def evaluate_ema_cross_candle(pair, wsname, closed_candles):
+    ready = _ema_ready(closed_candles)
+    if ready is None:
+        return None
+    fast_series, slow_series, atr = ready
+
+    signal_candle = closed_candles[-1]
+    if signal_candle["open"] <= 0:
+        return None
+
+    ema_fast_now, ema_fast_prev = fast_series[-1], fast_series[-2]
+    ema_slow_now, ema_slow_prev = slow_series[-1], slow_series[-2]
+
+    # A raw zero-crossing (fast == slow) has ~0 separation by definition, so
+    # gating on EMA_MIN_SEPARATION_ATR *at* that instant would almost never
+    # fire. Instead treat the cross as "confirmed" on whichever candle first
+    # pushes the signed fast-minus-slow gap through the ATR threshold -- that
+    # may be the raw crossing candle or a candle or two after it, once the
+    # move has some conviction behind it.
+    separation_now = (ema_fast_now - ema_slow_now) / atr
+    separation_prev = (ema_fast_prev - ema_slow_prev) / atr
+
+    crossed_up = separation_prev < EMA_MIN_SEPARATION_ATR <= separation_now
+    crossed_down = separation_prev > -EMA_MIN_SEPARATION_ATR >= separation_now
+    if not (crossed_up or crossed_down):
+        return None
+
+    separation_atr = abs(separation_now)
+
+    passes_participation = (
+        crossed_up
+        and signal_candle["close"] > signal_candle["open"]
+        and signal_candle["close"] > ema_fast_now
+    ) or (
+        crossed_down
+        and signal_candle["close"] < signal_candle["open"]
+        and signal_candle["close"] < ema_fast_now
+    )
+
+    passes_liquidity = _liquidity_stats(closed_candles, signal_candle)
+
+    log.debug(
+        "%s: ema_cross direction=%s separation_atr=%.2f "
+        "filters(participation=%s liquidity=%s)",
+        wsname or pair,
+        "UP" if crossed_up else "DOWN",
+        separation_atr,
+        passes_participation,
+        passes_liquidity,
+    )
+
+    if not (passes_participation and passes_liquidity):
+        return None
+
+    direction = "UP" if crossed_up else "DOWN"
+    price_change_pct = (
+        (signal_candle["close"] - signal_candle["open"])
+        / signal_candle["open"]
+        * 100.0
+    )
+
+    return {
+        "pair": wsname or pair,
+        "pair_key": pair,
+        "direction": direction,
+        "open": signal_candle["open"],
+        "high": signal_candle["high"],
+        "low": signal_candle["low"],
+        "close": signal_candle["close"],
+        "price_change_pct": price_change_pct,
+        "ema_fast": ema_fast_now,
+        "ema_slow": ema_slow_now,
+        "ema_separation_atr": separation_atr,
+        "signal_time": utc_datetime(signal_candle["time"]),
+        "signal_epoch": signal_candle["time"],
+    }
+
+
+def _ema_closed_candles_needed():
+    return EMA_SLOW_PERIOD + EMA_WARMUP_CANDLES
+
+
+def run_ema_cross_analysis(
+    pair,
+    wsname,
+    closed_candles,
+    interval_minutes,
+    require_next_candle_confirmation=False,
+):
+    hit = evaluate_ema_cross_candle(pair, wsname, closed_candles)
+    if hit is None:
+        return None
+
+    hit["alert_epoch"] = hit["signal_epoch"]
+    return hit
+
+
+def log_ema_cross_hit(hit, label):
+    log.info(
+        "HIT[ema_cross]: %s %s EMA cross, separation %.2f ATR, price %+.2f%% (%s)",
+        hit["pair"],
+        hit["direction"],
+        hit["ema_separation_atr"],
+        hit["price_change_pct"],
+        label,
+    )
+
+
+def render_ema_cross_item(hit):
+    pair = html.escape(str(hit["pair"]))
+    signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M UTC")
+    cross_label = (
+        "bullish (20 EMA over 50 EMA)"
+        if hit["direction"] == "UP"
+        else "bearish (20 EMA under 50 EMA)"
+    )
+
+    return (
+        f"<li><strong>{pair}</strong> {hit['direction']} EMA cross"
+        f" · {cross_label}"
+        f" · move {hit['price_change_pct']:+.2f}%"
+        f" · close {hit['close']:.8g}"
+        f" · 20 EMA {hit['ema_fast']:.8g} / 50 EMA {hit['ema_slow']:.8g}"
+        f" · separation {hit['ema_separation_atr']:.2f} ATR"
+        f" · signal {signal_time}</li>"
+    )
+
+
+def evaluate_ema_trend_pullback_candle(pair, wsname, closed_candles):
+    ready = _ema_ready(closed_candles)
+    if ready is None:
+        return None
+    fast_series, slow_series, atr = ready
+
+    if len(slow_series) <= EMA_TREND_LOOKBACK:
+        return None
+
+    signal_candle = closed_candles[-1]
+    if signal_candle["open"] <= 0:
+        return None
+
+    ema_fast_now = fast_series[-1]
+    ema_slow_now = slow_series[-1]
+    ema_slow_then = slow_series[-1 - EMA_TREND_LOOKBACK]
+
+    slope_atr = (ema_slow_now - ema_slow_then) / EMA_TREND_LOOKBACK / atr
+    separation_atr = abs(ema_fast_now - ema_slow_now) / atr
+
+    trend_up = (
+        ema_fast_now > ema_slow_now
+        and slope_atr >= EMA_MIN_SLOPE_ATR
+        and separation_atr >= EMA_MIN_SEPARATION_ATR
+    )
+    trend_down = (
+        ema_fast_now < ema_slow_now
+        and slope_atr <= -EMA_MIN_SLOPE_ATR
+        and separation_atr >= EMA_MIN_SEPARATION_ATR
+    )
+
+    if not (trend_up or trend_down):
+        return None
+
+    touch_price = signal_candle["low"] if trend_up else signal_candle["high"]
+    touch_distance_atr = abs(touch_price - ema_fast_now) / atr
+    touched_fast_ema = touch_distance_atr <= EMA_PULLBACK_TOUCH_ATR
+
+    reclaimed = (
+        trend_up
+        and signal_candle["close"] > ema_fast_now
+        and signal_candle["close"] > signal_candle["open"]
+    ) or (
+        trend_down
+        and signal_candle["close"] < ema_fast_now
+        and signal_candle["close"] < signal_candle["open"]
+    )
+
+    passes_liquidity = _liquidity_stats(closed_candles, signal_candle)
+
+    log.debug(
+        "%s: ema_trend_pullback trend_up=%s trend_down=%s slope_atr=%.2f "
+        "separation_atr=%.2f touch_distance_atr=%.2f "
+        "filters(touched=%s reclaimed=%s liquidity=%s)",
+        wsname or pair,
+        trend_up,
+        trend_down,
+        slope_atr,
+        separation_atr,
+        touch_distance_atr,
+        touched_fast_ema,
+        reclaimed,
+        passes_liquidity,
+    )
+
+    if not (touched_fast_ema and reclaimed and passes_liquidity):
+        return None
+
+    direction = "UP" if trend_up else "DOWN"
+    price_change_pct = (
+        (signal_candle["close"] - signal_candle["open"])
+        / signal_candle["open"]
+        * 100.0
+    )
+
+    return {
+        "pair": wsname or pair,
+        "pair_key": pair,
+        "direction": direction,
+        "open": signal_candle["open"],
+        "high": signal_candle["high"],
+        "low": signal_candle["low"],
+        "close": signal_candle["close"],
+        "price_change_pct": price_change_pct,
+        "ema_fast": ema_fast_now,
+        "ema_slow": ema_slow_now,
+        "ema_separation_atr": separation_atr,
+        "trend_slope_atr": slope_atr,
+        "touch_distance_atr": touch_distance_atr,
+        "signal_time": utc_datetime(signal_candle["time"]),
+        "signal_epoch": signal_candle["time"],
+    }
+
+
+def run_ema_trend_pullback_analysis(
+    pair,
+    wsname,
+    closed_candles,
+    interval_minutes,
+    require_next_candle_confirmation=False,
+):
+    hit = evaluate_ema_trend_pullback_candle(pair, wsname, closed_candles)
+    if hit is None:
+        return None
+
+    hit["alert_epoch"] = hit["signal_epoch"]
+    return hit
+
+
+def log_ema_trend_pullback_hit(hit, label):
+    log.info(
+        "HIT[ema_trend_pullback]: %s %s pullback, slope %+.2f ATR/candle, "
+        "touch %.2f ATR, price %+.2f%% (%s)",
+        hit["pair"],
+        hit["direction"],
+        hit["trend_slope_atr"],
+        hit["touch_distance_atr"],
+        hit["price_change_pct"],
+        label,
+    )
+
+
+def render_ema_trend_pullback_item(hit):
+    pair = html.escape(str(hit["pair"]))
+    signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M UTC")
+    trend_label = "uptrend" if hit["direction"] == "UP" else "downtrend"
+
+    return (
+        f"<li><strong>{pair}</strong> {hit['direction']} pullback in {trend_label}"
+        f" · move {hit['price_change_pct']:+.2f}%"
+        f" · close {hit['close']:.8g}"
+        f" · 20 EMA {hit['ema_fast']:.8g} / 50 EMA {hit['ema_slow']:.8g}"
+        f" · trend slope {hit['trend_slope_atr']:+.2f} ATR/candle"
+        f" · touched 20 EMA at {hit['touch_distance_atr']:.2f} ATR"
+        f" · signal {signal_time}</li>"
+    )
+
+
+# -----------------------------------------------------------------------------
 # Analysis registry
 #
 # Each entry is a self-contained analysis that runs against the *same*
@@ -840,6 +1211,34 @@ ANALYSES = [
             "plus liquidity filters.</p>"
         ),
     },
+    {
+        "key": "ema_cross",
+        "section_title": "EMA Cross Alerts",
+        "run": run_ema_cross_analysis,
+        "sort_key": lambda hit: hit["ema_separation_atr"],
+        "log_hit": log_ema_cross_hit,
+        "render_item": render_ema_cross_item,
+        "section_intro": lambda _confirm_label: (
+            f"<p>20/50 EMA crossed with &gt;= {EMA_MIN_SEPARATION_ATR:.2f} ATR "
+            "separation and a same-direction signal candle, plus liquidity "
+            "filters.</p>"
+        ),
+    },
+    {
+        "key": "ema_trend_pullback",
+        "section_title": "EMA Trend Pullback Alerts",
+        "run": run_ema_trend_pullback_analysis,
+        "sort_key": lambda hit: abs(hit["trend_slope_atr"]),
+        "log_hit": log_ema_trend_pullback_hit,
+        "render_item": render_ema_trend_pullback_item,
+        "section_intro": lambda _confirm_label: (
+            f"<p>50 EMA trending (slope &gt;= {EMA_MIN_SLOPE_ATR:.2f} ATR/candle, "
+            f"separation from 20 EMA &gt;= {EMA_MIN_SEPARATION_ATR:.2f} ATR) with "
+            f"price pulling back to the 20 EMA (within "
+            f"{EMA_PULLBACK_TOUCH_ATR:.2f} ATR) and closing back in the trend "
+            "direction, plus liquidity filters.</p>"
+        ),
+    },
 ]
 
 
@@ -847,6 +1246,7 @@ def _max_requested_candle_count(require_next_candle_confirmation):
     closed_needed = max(
         _breakout_closed_candles_needed(require_next_candle_confirmation),
         _volume_surge_closed_candles_needed(),
+        _ema_closed_candles_needed(),
     )
     # +1 for Kraken's currently forming candle, which is never evaluated.
     return closed_needed + 1
