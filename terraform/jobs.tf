@@ -28,6 +28,7 @@ module "crypto_analyser" {
     SMTP_HOST           = var.smtp_host
     SMTP_PORT           = var.smtp_port
     CANDLE_INTERVAL_MIN = "15"
+    ALERT_STATE_BUCKET  = google_storage_bucket.alert_state.name
   }
 
   secret_env = {
@@ -40,6 +41,7 @@ module "crypto_analyser" {
   depends_on = [
     google_project_service.apis,
     google_secret_manager_secret_iam_member.runtime_accessor,
+    google_storage_bucket_iam_member.runtime_alert_state_writer,
   ]
 }
 

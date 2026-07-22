@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from statistics import median
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -88,21 +89,12 @@ PRICE_CHANGE_ALERT_PCT = 1.5
 # -----------------------------------------------------------------------------
 # EMA trend settings
 #
-# Two separate analyses built on the same 20/50 EMA pair:
-#   - "ema_cross": alert once the fast/slow EMA gap first pushes through a
-#     minimum ATR-relative separation in a given direction. A raw zero-cross
-#     has ~0 separation by definition, so this is a "confirmed" cross --
-#     often the same candle as the raw cross, sometimes a candle or two
-#     later once the move has some conviction -- rather than the instant the
-#     two EMAs are exactly equal, which would whipsaw constantly on a 15m
-#     chart.
-#   - "ema_trend_pullback": alert when price pulls back to the fast EMA
-#     *within* an established trend (defined by slow-EMA slope and EMA
-#     ordering) and closes back in the trend direction. Fewer, later signals
-#     than the raw cross, but each one already has trend context behind it.
-# Both reuse the liquidity filters from the breakout analysis so alerts stay
-# on tradable pairs, and warm up the EMA over EMA_WARMUP_CANDLES extra bars
-# before trusting it (an EMA seeded from a plain SMA is inaccurate at first).
+# "ema_trend_pullback": alert when price pulls back to the fast EMA *within*
+# an established uptrend (defined by slow-EMA slope and EMA ordering) and
+# closes back up. Reuses the liquidity filters from the breakout analysis so
+# alerts stay on tradable pairs, and warms up the EMA over EMA_WARMUP_CANDLES
+# extra bars before trusting it (an EMA seeded from a plain SMA is inaccurate
+# at first).
 # -----------------------------------------------------------------------------
 
 EMA_FAST_PERIOD = 20
@@ -141,6 +133,13 @@ ALERT_STATE_FILE = get_env(
         "kraken_alert_state.json",
     ),
 )
+
+# Cloud Run Jobs have no persistent local disk across executions -- without
+# this, cooldowns silently reset to empty on every single run. When set,
+# state is read/written from this GCS object instead of ALERT_STATE_FILE.
+# Local/dev runs without it fall back to the plain local file above.
+ALERT_STATE_BUCKET = get_env("ALERT_STATE_BUCKET")
+ALERT_STATE_BLOB_NAME = get_env("ALERT_STATE_BLOB_NAME", "kraken_alert_state.json")
 
 log = logging.getLogger("kraken_breakout_alert")
 log.setLevel(LOG_LEVEL)
@@ -187,11 +186,71 @@ def format_interval(minutes):
     return f"{minutes}m"
 
 
-def utc_datetime(epoch_seconds):
-    return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc)
+# Kraken candle timestamps are UTC epoch seconds; alert emails/logs display
+# them in US Eastern (EDT/EST, whichever is in effect for that timestamp)
+# since that's the timezone the alerts are actually read in.
+DISPLAY_TZ = ZoneInfo("America/New_York")
+
+
+def to_display_datetime(epoch_seconds):
+    return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).astimezone(DISPLAY_TZ)
+
+
+def _gcs_state_blob():
+    from google.cloud import storage
+
+    client = storage.Client()
+    return client.bucket(ALERT_STATE_BUCKET).blob(ALERT_STATE_BLOB_NAME)
+
+
+def _load_state_from_gcs():
+    from google.api_core.exceptions import NotFound
+
+    try:
+        raw = _gcs_state_blob().download_as_text()
+    except NotFound:
+        log.debug(
+            "No existing state object at gs://%s/%s yet.",
+            ALERT_STATE_BUCKET,
+            ALERT_STATE_BLOB_NAME,
+        )
+        return {}
+    except Exception as exc:
+        log.warning(
+            "Could not read state from gs://%s/%s, starting fresh: %s",
+            ALERT_STATE_BUCKET,
+            ALERT_STATE_BLOB_NAME,
+            exc,
+        )
+        return {}
+
+    try:
+        state = json.loads(raw)
+        return state if isinstance(state, dict) else {}
+    except Exception as exc:
+        log.warning("Could not parse state from GCS, starting fresh: %s", exc)
+        return {}
+
+
+def _save_state_to_gcs(state):
+    try:
+        _gcs_state_blob().upload_from_string(
+            json.dumps(state, separators=(",", ":"), sort_keys=True),
+            content_type="application/json",
+        )
+    except Exception as exc:
+        log.warning(
+            "Could not write state to gs://%s/%s: %s",
+            ALERT_STATE_BUCKET,
+            ALERT_STATE_BLOB_NAME,
+            exc,
+        )
 
 
 def load_state(state_file=ALERT_STATE_FILE):
+    if ALERT_STATE_BUCKET:
+        return _load_state_from_gcs()
+
     if not os.path.exists(state_file):
         return {}
 
@@ -205,6 +264,10 @@ def load_state(state_file=ALERT_STATE_FILE):
 
 
 def save_state(state, state_file=ALERT_STATE_FILE):
+    if ALERT_STATE_BUCKET:
+        _save_state_to_gcs(state)
+        return
+
     directory = os.path.dirname(os.path.abspath(state_file))
     temporary_path = f"{state_file}.tmp"
 
@@ -470,22 +533,13 @@ def evaluate_signal_candle(pair, wsname, history, signal_candle):
         and signal_candle["close"] >= range_high + breakout_buffer
         and close_location >= MIN_CLOSE_LOCATION
     )
-    is_down_breakout = (
-        signal_candle["close"] < signal_candle["open"]
-        and signal_candle["close"] <= range_low - breakout_buffer
-        and close_location <= 1.0 - MIN_CLOSE_LOCATION
-    )
 
-    if not (is_up_breakout or is_down_breakout):
+    if not is_up_breakout:
         return None
 
-    direction = "UP" if is_up_breakout else "DOWN"
-    breakout_level = range_high if is_up_breakout else range_low
-    breakout_distance = (
-        signal_candle["close"] - breakout_level
-        if is_up_breakout
-        else breakout_level - signal_candle["close"]
-    )
+    direction = "UP"
+    breakout_level = range_high
+    breakout_distance = signal_candle["close"] - breakout_level
     breakout_strength_atr = breakout_distance / atr
 
     volume_window = history[-VOLUME_LOOKBACK:]
@@ -556,9 +610,7 @@ def evaluate_signal_candle(pair, wsname, history, signal_candle):
     ):
         return None
 
-    close_extreme_ratio = (
-        close_location if is_up_breakout else 1.0 - close_location
-    )
+    close_extreme_ratio = close_location
 
     return {
         "pair": wsname or pair,
@@ -585,7 +637,7 @@ def evaluate_signal_candle(pair, wsname, history, signal_candle):
         "volume_robust_z": volume_robust_z,
         "signal_trade_count": signal_candle["count"],
         "median_trade_count": median_trade_count,
-        "signal_time": utc_datetime(signal_candle["time"]),
+        "signal_time": to_display_datetime(signal_candle["time"]),
         "signal_epoch": signal_candle["time"],
         "confirmation_time": None,
         "confirmation_epoch": None,
@@ -610,16 +662,10 @@ def next_candle_confirms(hit, signal_candle, confirmation_candle, interval_minut
     level = hit["breakout_level"]
     tolerance = hit["atr"] * CONFIRM_RETEST_TOLERANCE_ATR
 
-    if hit["direction"] == "UP":
-        confirmed = (
-            confirmation_candle["close"] > level
-            and confirmation_candle["low"] >= level - tolerance
-        )
-    else:
-        confirmed = (
-            confirmation_candle["close"] < level
-            and confirmation_candle["high"] <= level + tolerance
-        )
+    confirmed = (
+        confirmation_candle["close"] > level
+        and confirmation_candle["low"] >= level - tolerance
+    )
 
     if not confirmed:
         log.debug(
@@ -633,7 +679,7 @@ def next_candle_confirms(hit, signal_candle, confirmation_candle, interval_minut
         )
         return False
 
-    hit["confirmation_time"] = utc_datetime(confirmation_candle["time"])
+    hit["confirmation_time"] = to_display_datetime(confirmation_candle["time"])
     hit["confirmation_epoch"] = confirmation_candle["time"]
     hit["confirmation_close"] = confirmation_candle["close"]
     hit["confirmed_by_next_candle"] = True
@@ -699,11 +745,11 @@ def log_breakout_hit(hit, label):
 
 def render_breakout_item(hit):
     pair = html.escape(str(hit["pair"]))
-    signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M UTC")
+    signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M %Z")
     confirmation_text = ""
 
     if hit["confirmed_by_next_candle"]:
-        confirmation_time = hit["confirmation_time"].strftime("%Y-%m-%d %H:%M UTC")
+        confirmation_time = hit["confirmation_time"].strftime("%Y-%m-%d %H:%M %Z")
         confirmation_text = (
             f" · confirmed {confirmation_time}"
             f" at {hit['confirmation_close']:.8g}"
@@ -757,7 +803,7 @@ def evaluate_volume_price_candle(pair, wsname, history, signal_candle):
     )
 
     passes_volume = volume_multiple >= VOLUME_SPIKE_MULTIPLE
-    passes_price = abs(price_change_pct) >= PRICE_CHANGE_ALERT_PCT
+    passes_price = price_change_pct >= PRICE_CHANGE_ALERT_PCT
     passes_liquidity = (
         median_quote_volume >= MIN_MEDIAN_QUOTE_VOLUME
         and median_trade_count >= MIN_MEDIAN_TRADE_COUNT
@@ -782,12 +828,10 @@ def evaluate_volume_price_candle(pair, wsname, history, signal_candle):
     if not (passes_volume and passes_price and passes_liquidity):
         return None
 
-    direction = "UP" if price_change_pct > 0 else "DOWN"
-
     return {
         "pair": wsname or pair,
         "pair_key": pair,
-        "direction": direction,
+        "direction": "UP",
         "open": signal_candle["open"],
         "high": signal_candle["high"],
         "low": signal_candle["low"],
@@ -799,7 +843,7 @@ def evaluate_volume_price_candle(pair, wsname, history, signal_candle):
         "volume_multiple": volume_multiple,
         "signal_trade_count": signal_candle["count"],
         "median_trade_count": median_trade_count,
-        "signal_time": utc_datetime(signal_candle["time"]),
+        "signal_time": to_display_datetime(signal_candle["time"]),
         "signal_epoch": signal_candle["time"],
     }
 
@@ -843,7 +887,7 @@ def log_volume_surge_hit(hit, label):
 
 def render_volume_surge_item(hit):
     pair = html.escape(str(hit["pair"]))
-    signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M UTC")
+    signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M %Z")
 
     return (
         f"<li><strong>{pair}</strong> {hit['direction']}"
@@ -858,16 +902,13 @@ def render_volume_surge_item(hit):
 # -----------------------------------------------------------------------------
 # EMA evaluation
 #
-# Both functions below share the same 20/50 EMA warm-up requirement (see
-# _ema_closed_candles_needed) but ask two different questions of it:
-#   - evaluate_ema_cross_candle: did the fast/slow EMA just cross?
-#   - evaluate_ema_trend_pullback_candle: is there an established trend, and
-#     did price just bounce off the fast EMA in that trend's direction?
+# evaluate_ema_trend_pullback_candle: is there an established uptrend, and
+# did price just bounce off the fast EMA in that trend's direction?
 # -----------------------------------------------------------------------------
 
 
 def _ema_ready(closed_candles):
-    """Compute the fast/slow EMA series and ATR shared by both EMA analyses,
+    """Compute the fast/slow EMA series and ATR needed by the EMA analysis,
     or None if there isn't enough warmed-up history yet."""
     if len(closed_candles) < _ema_closed_candles_needed():
         return None
@@ -877,15 +918,19 @@ def _ema_ready(closed_candles):
     if len(fast_series) < 2 or len(slow_series) < 2:
         return None
 
-    atr = calculate_atr(closed_candles, ATR_PERIOD)
+    # ATR is a "how big is a normal move" baseline, so -- same as the
+    # breakout analysis -- it must be computed as of *before* the signal
+    # candle, not including it. Otherwise the signal candle's own range
+    # would inflate the baseline it's being measured against.
+    atr = calculate_atr(closed_candles[:-1], ATR_PERIOD)
     if atr is None or atr <= 0:
         return None
 
     return fast_series, slow_series, atr
 
 
-def _liquidity_stats(closed_candles, signal_candle):
-    volume_window = closed_candles[-VOLUME_LOOKBACK:]
+def _liquidity_stats(history, signal_candle):
+    volume_window = history[-VOLUME_LOOKBACK:]
     historical_quote_volumes = [
         candle["volume"] * candle["vwap"] for candle in volume_window
     ]
@@ -901,132 +946,8 @@ def _liquidity_stats(closed_candles, signal_candle):
     return passes_liquidity
 
 
-def evaluate_ema_cross_candle(pair, wsname, closed_candles):
-    ready = _ema_ready(closed_candles)
-    if ready is None:
-        return None
-    fast_series, slow_series, atr = ready
-
-    signal_candle = closed_candles[-1]
-    if signal_candle["open"] <= 0:
-        return None
-
-    ema_fast_now, ema_fast_prev = fast_series[-1], fast_series[-2]
-    ema_slow_now, ema_slow_prev = slow_series[-1], slow_series[-2]
-
-    # A raw zero-crossing (fast == slow) has ~0 separation by definition, so
-    # gating on EMA_MIN_SEPARATION_ATR *at* that instant would almost never
-    # fire. Instead treat the cross as "confirmed" on whichever candle first
-    # pushes the signed fast-minus-slow gap through the ATR threshold -- that
-    # may be the raw crossing candle or a candle or two after it, once the
-    # move has some conviction behind it.
-    separation_now = (ema_fast_now - ema_slow_now) / atr
-    separation_prev = (ema_fast_prev - ema_slow_prev) / atr
-
-    crossed_up = separation_prev < EMA_MIN_SEPARATION_ATR <= separation_now
-    crossed_down = separation_prev > -EMA_MIN_SEPARATION_ATR >= separation_now
-    if not (crossed_up or crossed_down):
-        return None
-
-    separation_atr = abs(separation_now)
-
-    passes_participation = (
-        crossed_up
-        and signal_candle["close"] > signal_candle["open"]
-        and signal_candle["close"] > ema_fast_now
-    ) or (
-        crossed_down
-        and signal_candle["close"] < signal_candle["open"]
-        and signal_candle["close"] < ema_fast_now
-    )
-
-    passes_liquidity = _liquidity_stats(closed_candles, signal_candle)
-
-    log.debug(
-        "%s: ema_cross direction=%s separation_atr=%.2f "
-        "filters(participation=%s liquidity=%s)",
-        wsname or pair,
-        "UP" if crossed_up else "DOWN",
-        separation_atr,
-        passes_participation,
-        passes_liquidity,
-    )
-
-    if not (passes_participation and passes_liquidity):
-        return None
-
-    direction = "UP" if crossed_up else "DOWN"
-    price_change_pct = (
-        (signal_candle["close"] - signal_candle["open"])
-        / signal_candle["open"]
-        * 100.0
-    )
-
-    return {
-        "pair": wsname or pair,
-        "pair_key": pair,
-        "direction": direction,
-        "open": signal_candle["open"],
-        "high": signal_candle["high"],
-        "low": signal_candle["low"],
-        "close": signal_candle["close"],
-        "price_change_pct": price_change_pct,
-        "ema_fast": ema_fast_now,
-        "ema_slow": ema_slow_now,
-        "ema_separation_atr": separation_atr,
-        "signal_time": utc_datetime(signal_candle["time"]),
-        "signal_epoch": signal_candle["time"],
-    }
-
-
 def _ema_closed_candles_needed():
     return EMA_SLOW_PERIOD + EMA_WARMUP_CANDLES
-
-
-def run_ema_cross_analysis(
-    pair,
-    wsname,
-    closed_candles,
-    interval_minutes,
-    require_next_candle_confirmation=False,
-):
-    hit = evaluate_ema_cross_candle(pair, wsname, closed_candles)
-    if hit is None:
-        return None
-
-    hit["alert_epoch"] = hit["signal_epoch"]
-    return hit
-
-
-def log_ema_cross_hit(hit, label):
-    log.info(
-        "HIT[ema_cross]: %s %s EMA cross, separation %.2f ATR, price %+.2f%% (%s)",
-        hit["pair"],
-        hit["direction"],
-        hit["ema_separation_atr"],
-        hit["price_change_pct"],
-        label,
-    )
-
-
-def render_ema_cross_item(hit):
-    pair = html.escape(str(hit["pair"]))
-    signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M UTC")
-    cross_label = (
-        "bullish (20 EMA over 50 EMA)"
-        if hit["direction"] == "UP"
-        else "bearish (20 EMA under 50 EMA)"
-    )
-
-    return (
-        f"<li><strong>{pair}</strong> {hit['direction']} EMA cross"
-        f" · {cross_label}"
-        f" · move {hit['price_change_pct']:+.2f}%"
-        f" · close {hit['close']:.8g}"
-        f" · 20 EMA {hit['ema_fast']:.8g} / 50 EMA {hit['ema_slow']:.8g}"
-        f" · separation {hit['ema_separation_atr']:.2f} ATR"
-        f" · signal {signal_time}</li>"
-    )
 
 
 def evaluate_ema_trend_pullback_candle(pair, wsname, closed_candles):
@@ -1054,38 +975,26 @@ def evaluate_ema_trend_pullback_candle(pair, wsname, closed_candles):
         and slope_atr >= EMA_MIN_SLOPE_ATR
         and separation_atr >= EMA_MIN_SEPARATION_ATR
     )
-    trend_down = (
-        ema_fast_now < ema_slow_now
-        and slope_atr <= -EMA_MIN_SLOPE_ATR
-        and separation_atr >= EMA_MIN_SEPARATION_ATR
-    )
 
-    if not (trend_up or trend_down):
+    if not trend_up:
         return None
 
-    touch_price = signal_candle["low"] if trend_up else signal_candle["high"]
-    touch_distance_atr = abs(touch_price - ema_fast_now) / atr
+    touch_distance_atr = abs(signal_candle["low"] - ema_fast_now) / atr
     touched_fast_ema = touch_distance_atr <= EMA_PULLBACK_TOUCH_ATR
 
     reclaimed = (
-        trend_up
-        and signal_candle["close"] > ema_fast_now
+        signal_candle["close"] > ema_fast_now
         and signal_candle["close"] > signal_candle["open"]
-    ) or (
-        trend_down
-        and signal_candle["close"] < ema_fast_now
-        and signal_candle["close"] < signal_candle["open"]
     )
 
-    passes_liquidity = _liquidity_stats(closed_candles, signal_candle)
+    passes_liquidity = _liquidity_stats(closed_candles[:-1], signal_candle)
 
     log.debug(
-        "%s: ema_trend_pullback trend_up=%s trend_down=%s slope_atr=%.2f "
+        "%s: ema_trend_pullback trend_up=%s slope_atr=%.2f "
         "separation_atr=%.2f touch_distance_atr=%.2f "
         "filters(touched=%s reclaimed=%s liquidity=%s)",
         wsname or pair,
         trend_up,
-        trend_down,
         slope_atr,
         separation_atr,
         touch_distance_atr,
@@ -1097,7 +1006,6 @@ def evaluate_ema_trend_pullback_candle(pair, wsname, closed_candles):
     if not (touched_fast_ema and reclaimed and passes_liquidity):
         return None
 
-    direction = "UP" if trend_up else "DOWN"
     price_change_pct = (
         (signal_candle["close"] - signal_candle["open"])
         / signal_candle["open"]
@@ -1107,7 +1015,7 @@ def evaluate_ema_trend_pullback_candle(pair, wsname, closed_candles):
     return {
         "pair": wsname or pair,
         "pair_key": pair,
-        "direction": direction,
+        "direction": "UP",
         "open": signal_candle["open"],
         "high": signal_candle["high"],
         "low": signal_candle["low"],
@@ -1118,7 +1026,7 @@ def evaluate_ema_trend_pullback_candle(pair, wsname, closed_candles):
         "ema_separation_atr": separation_atr,
         "trend_slope_atr": slope_atr,
         "touch_distance_atr": touch_distance_atr,
-        "signal_time": utc_datetime(signal_candle["time"]),
+        "signal_time": to_display_datetime(signal_candle["time"]),
         "signal_epoch": signal_candle["time"],
     }
 
@@ -1153,11 +1061,10 @@ def log_ema_trend_pullback_hit(hit, label):
 
 def render_ema_trend_pullback_item(hit):
     pair = html.escape(str(hit["pair"]))
-    signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M UTC")
-    trend_label = "uptrend" if hit["direction"] == "UP" else "downtrend"
+    signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M %Z")
 
     return (
-        f"<li><strong>{pair}</strong> {hit['direction']} pullback in {trend_label}"
+        f"<li><strong>{pair}</strong> {hit['direction']} pullback in uptrend"
         f" · move {hit['price_change_pct']:+.2f}%"
         f" · close {hit['close']:.8g}"
         f" · 20 EMA {hit['ema_fast']:.8g} / 50 EMA {hit['ema_slow']:.8g}"
@@ -1183,6 +1090,14 @@ def render_ema_trend_pullback_item(hit):
 #      the email section.
 #   4. Append a new entry below. No other code needs to change: the scanner
 #      loop, cooldown state, and combined email all iterate this list.
+#
+# Two optional hooks are available for analyses whose notion of "duplicate"
+# is more than "same pair within COOLDOWN_CANDLES":
+#   - "is_duplicate(state, pair, hit) -> bool": checked before the cooldown
+#     check; return True to suppress this hit without recording it anywhere.
+#   - "on_alert(state, hit)": called once per hit that survives every check
+#     and makes it into the sent email, for recording whatever extra state
+#     is_duplicate needs to check next time.
 # -----------------------------------------------------------------------------
 
 ANALYSES = [
@@ -1209,19 +1124,6 @@ ANALYSES = [
             f"<p>Signals passed volume &gt;= {VOLUME_SPIKE_MULTIPLE:.1f}x median and "
             f"price move &gt;= {PRICE_CHANGE_ALERT_PCT:.1f}% on the closed candle, "
             "plus liquidity filters.</p>"
-        ),
-    },
-    {
-        "key": "ema_cross",
-        "section_title": "EMA Cross Alerts",
-        "run": run_ema_cross_analysis,
-        "sort_key": lambda hit: hit["ema_separation_atr"],
-        "log_hit": log_ema_cross_hit,
-        "render_item": render_ema_cross_item,
-        "section_intro": lambda _confirm_label: (
-            f"<p>20/50 EMA crossed with &gt;= {EMA_MIN_SEPARATION_ATR:.2f} ATR "
-            "separation and a same-direction signal candle, plus liquidity "
-            "filters.</p>"
         ),
     },
     {
@@ -1405,6 +1307,15 @@ def scan_once(interval_minutes, require_next_candle_confirmation=False):
                     if result is None:
                         continue
 
+                    is_duplicate = spec.get("is_duplicate")
+                    if is_duplicate is not None and is_duplicate(state, pair, result):
+                        log.debug(
+                            "%s: %s repeats the last alerted direction, skipping",
+                            wsname or pair,
+                            spec["key"],
+                        )
+                        continue
+
                     if in_cooldown(
                         state[spec["key"]],
                         pair,
@@ -1466,8 +1377,11 @@ def scan_once(interval_minutes, require_next_candle_confirmation=False):
                 continue
 
             hits.sort(key=spec["sort_key"], reverse=True)
+            on_alert = spec.get("on_alert")
             for hit in hits:
                 state[spec["key"]][hit["pair_key"]] = hit["alert_epoch"]
+                if on_alert is not None:
+                    on_alert(state, hit)
 
         send_combined_alert(
             hits_by_analysis,
