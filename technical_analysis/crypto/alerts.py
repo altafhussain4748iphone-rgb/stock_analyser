@@ -1098,12 +1098,13 @@ def render_ema_trend_pullback_item(hit):
 # or more over the last MOMENTUM_CANDLE_COUNT candles, with average volume
 # over that window running above the average volume of the last
 # MOMENTUM_VOLUME_LOOKBACK candles (which includes the signal window itself,
-# same as a simple relative-volume reading)?
+# same as a simple relative-volume reading), while price is trading above
+# both the 20 and 50 EMA and the 20 EMA is above the 50 EMA (uptrend filter)?
 # -----------------------------------------------------------------------------
 
 
 def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
-    if len(closed_candles) < MOMENTUM_VOLUME_LOOKBACK:
+    if len(closed_candles) < _momentum_surge_closed_candles_needed():
         return None
 
     window = closed_candles[-MOMENTUM_CANDLE_COUNT:]
@@ -1111,6 +1112,13 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
 
     if window[0]["open"] <= 0:
         return None
+
+    fast_series = calculate_ema_series(closed_candles, EMA_FAST_PERIOD)
+    slow_series = calculate_ema_series(closed_candles, EMA_SLOW_PERIOD)
+    if not fast_series or not slow_series:
+        return None
+    ema_fast_now = fast_series[-1]
+    ema_slow_now = slow_series[-1]
 
     price_change_pct = (
         (signal_candle["close"] - window[0]["open"])
@@ -1134,11 +1142,16 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
     passes_price = price_change_pct >= MOMENTUM_PRICE_CHANGE_PCT
     passes_volume = average_signal_volume > average_baseline_volume
     passes_liquidity = _liquidity_stats(closed_candles[:-1], signal_candle)
+    passes_ema_trend = (
+        signal_candle["close"] > ema_fast_now
+        and signal_candle["close"] > ema_slow_now
+        and ema_fast_now > ema_slow_now
+    )
 
     log.debug(
         "%s: momentum_surge price=%+.2f%% signal_volume=%.2f "
         "baseline_volume=%.2f multiple=%.2fx "
-        "filters(price=%s volume=%s liquidity=%s)",
+        "filters(price=%s volume=%s liquidity=%s ema_trend=%s)",
         wsname or pair,
         price_change_pct,
         average_signal_volume,
@@ -1147,9 +1160,10 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
         passes_price,
         passes_volume,
         passes_liquidity,
+        passes_ema_trend,
     )
 
-    if not (passes_price and passes_volume and passes_liquidity):
+    if not (passes_price and passes_volume and passes_liquidity and passes_ema_trend):
         return None
 
     return {
@@ -1170,7 +1184,7 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
 
 
 def _momentum_surge_closed_candles_needed():
-    return MOMENTUM_VOLUME_LOOKBACK
+    return max(MOMENTUM_VOLUME_LOOKBACK, _ema_closed_candles_needed())
 
 
 def run_momentum_surge_analysis(
