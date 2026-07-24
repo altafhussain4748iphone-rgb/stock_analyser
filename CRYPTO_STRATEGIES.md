@@ -30,7 +30,7 @@ that pokes through and fades.
 | Close location in candle | ≥ 75% toward the extreme |
 | Body size | ≥ 0.80 × ATR |
 | Volume vs 96-candle median | ≥ 2.0× **and** robust z-score ≥ 3.0 |
-| Liquidity floor | median quote volume ≥ $25,000, ≥10 trades/candle |
+| Liquidity floor | median quote volume ≥ $12,500, ≥5 trades/candle |
 | Cooldown | 4 candles per pair |
 
 ### Scenario A — the intended win: volume-backed breakout continues
