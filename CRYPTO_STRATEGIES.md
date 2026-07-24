@@ -1,9 +1,9 @@
 # Crypto Alert Strategies
 
-`technical_analysis/crypto/alerts.py` runs three independent analyses against
+`technical_analysis/crypto/alerts.py` runs four independent analyses against
 one shared Kraken 15-minute candle fetch per pair (see the `ANALYSES`
 registry). Each scan sends **one combined email** with a section per analysis
-that had hits. All three only alert on upside signals — no DOWN/bearish
+that had hits. All four only alert on upside signals — no DOWN/bearish
 alerts are sent. This document explains what each analysis actually checks
 and walks through example trades in a few different market scenarios —
 including scenarios where the strategy is *wrong*, since that's just as
@@ -164,13 +164,56 @@ touches** — exactly the scenario this filter exists to reject, since a
 
 ---
 
+## 4. Momentum Surge (`momentum_surge`)
+
+**What it checks:** the coarsest, fastest-firing analysis of the four — no
+candle-quality or ATR filters at all. Has price already moved a meaningful
+amount over the last few candles, with volume over that window running above
+a longer baseline?
+
+| Filter | Threshold |
+|---|---|
+| Price move over last 5 candles | ≥ 5.0% (open of the 5-candle window to close of the last) |
+| Average volume over those 5 candles | > average volume over the last 20 candles |
+| Liquidity floor | same as breakout |
+| Cooldown | 4 candles per pair |
+
+Note the 20-candle baseline *includes* the 5 signal candles — it isn't a
+separate "prior" window. That makes the volume check closer to "volume
+hasn't dropped off during the move" than "volume is unusually high," which
+is a much weaker bar than the 2–3x multiples the other analyses require.
+
+### Scenario A — the intended catch: a move already underway, confirmed by volume
+
+ADA/USD grinds from $0.4200 to $0.4430 over 5 candles (+5.5%), and the
+5-candle average quote volume is running above the 20-candle average — the
+move isn't happening on fading interest. **Alert fires: UP.** Useful as a
+"this is already moving, decide if you want in" signal, not an early entry.
+
+### Scenario B — the failure mode: alerts near the top of an already-extended move
+
+The same ADA/USD move continues for another 10 candles before reversing.
+Because the trigger requires the move to have *already happened* over a
+5-candle window, by construction the alert can only fire after most of the
+gain is behind it — there's no mechanism here (unlike `ema_trend_pullback`)
+that looks for a lower-risk entry point.
+
+### Scenario C — correctly does *not* fire: choppy volume during the move
+
+A pair moves +6% over 5 candles, but volume on those candles is actually
+*lower* on average than the last 20 candles (the move happened on thinning
+participation). **No alert** — the volume condition is the one thing keeping
+this analysis from firing on random 5%+ chop.
+
+---
+
 ## The honest caveat
 
-All three analyses encode reasonable, standard technical-trading logic, but:
+All four analyses encode reasonable, standard technical-trading logic, but:
 
 - **None of it executes trades.** There's no position sizing, stop-loss, or
   exit logic — these are alerts, not an automated strategy.
-- **All three do better trending, worse chopping.** Crypto spends a lot of
+- **All four do better trending, worse chopping.** Crypto spends a lot of
   time chopping.
 - **Fees and slippage aren't modeled.** A signal that "works" on the chart
   can still lose money after Kraken's taker fee and spread on a thin pair.

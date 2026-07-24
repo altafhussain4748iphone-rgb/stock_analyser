@@ -118,6 +118,23 @@ EMA_PULLBACK_TOUCH_ATR = 0.35
 
 
 # -----------------------------------------------------------------------------
+# Momentum-surge settings
+#
+# "momentum_surge": a coarser, faster-firing check than breakout or
+# ema_trend_pullback -- no candle-quality or ATR filters at all. Alert when
+# price has moved MOMENTUM_PRICE_CHANGE_PCT or more over the last
+# MOMENTUM_CANDLE_COUNT candles, while average volume over that same window
+# is running above the average volume of the last MOMENTUM_VOLUME_LOOKBACK
+# candles. Reuses the breakout liquidity floor so alerts stay on tradable
+# pairs.
+# -----------------------------------------------------------------------------
+
+MOMENTUM_CANDLE_COUNT = 5
+MOMENTUM_VOLUME_LOOKBACK = 20
+MOMENTUM_PRICE_CHANGE_PCT = 5.0
+
+
+# -----------------------------------------------------------------------------
 # Application configuration and logging
 # -----------------------------------------------------------------------------
 
@@ -1075,6 +1092,133 @@ def render_ema_trend_pullback_item(hit):
 
 
 # -----------------------------------------------------------------------------
+# Momentum-surge evaluation
+#
+# evaluate_momentum_surge_candles: has price moved MOMENTUM_PRICE_CHANGE_PCT
+# or more over the last MOMENTUM_CANDLE_COUNT candles, with average volume
+# over that window running above the average volume of the last
+# MOMENTUM_VOLUME_LOOKBACK candles (which includes the signal window itself,
+# same as a simple relative-volume reading)?
+# -----------------------------------------------------------------------------
+
+
+def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
+    if len(closed_candles) < MOMENTUM_VOLUME_LOOKBACK:
+        return None
+
+    window = closed_candles[-MOMENTUM_CANDLE_COUNT:]
+    signal_candle = window[-1]
+
+    if window[0]["open"] <= 0:
+        return None
+
+    price_change_pct = (
+        (signal_candle["close"] - window[0]["open"])
+        / window[0]["open"]
+        * 100.0
+    )
+
+    baseline_window = closed_candles[-MOMENTUM_VOLUME_LOOKBACK:]
+    average_baseline_volume = sum(
+        candle["volume"] * candle["vwap"] for candle in baseline_window
+    ) / len(baseline_window)
+    average_signal_volume = sum(
+        candle["volume"] * candle["vwap"] for candle in window
+    ) / len(window)
+
+    if average_baseline_volume <= 0:
+        return None
+
+    volume_multiple = average_signal_volume / average_baseline_volume
+
+    passes_price = price_change_pct >= MOMENTUM_PRICE_CHANGE_PCT
+    passes_volume = average_signal_volume > average_baseline_volume
+    passes_liquidity = _liquidity_stats(closed_candles[:-1], signal_candle)
+
+    log.debug(
+        "%s: momentum_surge price=%+.2f%% signal_volume=%.2f "
+        "baseline_volume=%.2f multiple=%.2fx "
+        "filters(price=%s volume=%s liquidity=%s)",
+        wsname or pair,
+        price_change_pct,
+        average_signal_volume,
+        average_baseline_volume,
+        volume_multiple,
+        passes_price,
+        passes_volume,
+        passes_liquidity,
+    )
+
+    if not (passes_price and passes_volume and passes_liquidity):
+        return None
+
+    return {
+        "pair": wsname or pair,
+        "pair_key": pair,
+        "direction": "UP",
+        "open": window[0]["open"],
+        "high": max(candle["high"] for candle in window),
+        "low": min(candle["low"] for candle in window),
+        "close": signal_candle["close"],
+        "price_change_pct": price_change_pct,
+        "average_signal_volume": average_signal_volume,
+        "average_baseline_volume": average_baseline_volume,
+        "volume_multiple": volume_multiple,
+        "signal_time": to_display_datetime(signal_candle["time"]),
+        "signal_epoch": signal_candle["time"],
+    }
+
+
+def _momentum_surge_closed_candles_needed():
+    return MOMENTUM_VOLUME_LOOKBACK
+
+
+def run_momentum_surge_analysis(
+    pair,
+    wsname,
+    closed_candles,
+    interval_minutes,
+    require_next_candle_confirmation=False,
+):
+    if len(closed_candles) < _momentum_surge_closed_candles_needed():
+        return None
+
+    hit = evaluate_momentum_surge_candles(pair, wsname, closed_candles)
+    if hit is None:
+        return None
+
+    hit["alert_epoch"] = hit["signal_epoch"]
+    return hit
+
+
+def log_momentum_surge_hit(hit, label):
+    log.info(
+        "HIT[momentum_surge]: %s %s move %+.2f%% over %d candles, "
+        "volume %.1fx %d-candle average (%s)",
+        hit["pair"],
+        hit["direction"],
+        hit["price_change_pct"],
+        MOMENTUM_CANDLE_COUNT,
+        hit["volume_multiple"],
+        MOMENTUM_VOLUME_LOOKBACK,
+        label,
+    )
+
+
+def render_momentum_surge_item(hit):
+    pair = html.escape(str(hit["pair"]))
+    signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M %Z")
+
+    return (
+        f"<li><strong>{pair}</strong> {hit['direction']} momentum"
+        f" · {MOMENTUM_CANDLE_COUNT}-candle move {hit['price_change_pct']:+.2f}%"
+        f" · close {hit['close']:.8g}"
+        f" · volume {hit['volume_multiple']:.2f}x {MOMENTUM_VOLUME_LOOKBACK}-candle average"
+        f" · signal {signal_time}</li>"
+    )
+
+
+# -----------------------------------------------------------------------------
 # Analysis registry
 #
 # Each entry is a self-contained analysis that runs against the *same*
@@ -1141,6 +1285,20 @@ ANALYSES = [
             "direction, plus liquidity filters.</p>"
         ),
     },
+    {
+        "key": "momentum_surge",
+        "section_title": "Momentum Surge Alerts",
+        "run": run_momentum_surge_analysis,
+        "sort_key": lambda hit: hit["price_change_pct"],
+        "log_hit": log_momentum_surge_hit,
+        "render_item": render_momentum_surge_item,
+        "section_intro": lambda _confirm_label: (
+            f"<p>Signals passed a {MOMENTUM_CANDLE_COUNT}-candle price move "
+            f"&gt;= {MOMENTUM_PRICE_CHANGE_PCT:.1f}% with average volume over "
+            f"those candles above the {MOMENTUM_VOLUME_LOOKBACK}-candle "
+            "average, plus liquidity filters.</p>"
+        ),
+    },
 ]
 
 
@@ -1149,6 +1307,7 @@ def _max_requested_candle_count(require_next_candle_confirmation):
         _breakout_closed_candles_needed(require_next_candle_confirmation),
         _volume_surge_closed_candles_needed(),
         _ema_closed_candles_needed(),
+        _momentum_surge_closed_candles_needed(),
     )
     # +1 for Kraken's currently forming candle, which is never evaluated.
     return closed_needed + 1
