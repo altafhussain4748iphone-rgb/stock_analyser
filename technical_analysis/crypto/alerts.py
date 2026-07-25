@@ -30,6 +30,7 @@ from technical_analysis.crypto.config import (
     EMA_TREND_LOOKBACK,
     EMA_WARMUP_CANDLES,
     KRAKEN_API_URL,
+    MIN_24H_QUOTE_VOLUME,
     MIN_BODY_ATR,
     MIN_BODY_RATIO,
     MIN_CLOSE_LOCATION,
@@ -485,6 +486,7 @@ def evaluate_signal_candle(pair, wsname, history, signal_candle):
     ]
     current_quote_volume = signal_candle["volume"] * signal_candle["vwap"]
     median_quote_volume = median(historical_quote_volumes)
+    quote_volume_24h = sum(historical_quote_volumes) + current_quote_volume
 
     if median_quote_volume <= 0:
         return None
@@ -515,12 +517,14 @@ def evaluate_signal_candle(pair, wsname, history, signal_candle):
         and median_trade_count >= MIN_MEDIAN_TRADE_COUNT
         and signal_candle["count"] >= MIN_SIGNAL_TRADE_COUNT
     )
+    passes_volume_24h = quote_volume_24h >= MIN_24H_QUOTE_VOLUME
 
     log.debug(
         "%s: direction=%s price=%+.2f%% body=%.2f body_atr=%.2f "
         "close_location=%.2f breakout_atr=%.2f volume=%.2fx z=%.2f "
         "median_quote_volume=%.2f median_trades=%.1f signal_trades=%d "
-        "filters(conviction=%s move=%s volume=%s liquidity=%s)",
+        "quote_volume_24h=%.2f "
+        "filters(conviction=%s move=%s volume=%s liquidity=%s volume_24h=%s)",
         wsname or pair,
         direction,
         price_change_pct,
@@ -533,10 +537,12 @@ def evaluate_signal_candle(pair, wsname, history, signal_candle):
         median_quote_volume,
         median_trade_count,
         signal_candle["count"],
+        quote_volume_24h,
         passes_conviction,
         passes_move,
         passes_volume,
         passes_liquidity,
+        passes_volume_24h,
     )
 
     if not (
@@ -544,6 +550,7 @@ def evaluate_signal_candle(pair, wsname, history, signal_candle):
         and passes_move
         and passes_volume
         and passes_liquidity
+        and passes_volume_24h
     ):
         return None
 
@@ -570,6 +577,7 @@ def evaluate_signal_candle(pair, wsname, history, signal_candle):
         "base_volume": signal_candle["volume"],
         "quote_volume": current_quote_volume,
         "median_quote_volume": median_quote_volume,
+        "quote_volume_24h": quote_volume_24h,
         "volume_multiple": volume_multiple,
         "volume_robust_z": volume_robust_z,
         "signal_trade_count": signal_candle["count"],
@@ -680,6 +688,19 @@ def log_breakout_hit(hit, label):
     )
 
 
+def _render_alert_card(pair, headline, detail):
+    return (
+        '<div style="border-left:4px solid #2e7d32;background:#f6fbf6;'
+        'padding:10px 14px;margin:10px 0;border-radius:4px;'
+        'font-family:-apple-system,Arial,sans-serif;">'
+        f'<div style="font-size:15px;font-weight:600;color:#1a1a1a;">'
+        f'{pair} <span style="color:#2e7d32;">▲ {headline}</span></div>'
+        f'<div style="font-size:12.5px;color:#5a5a5a;margin-top:4px;'
+        f'line-height:1.5;">{detail}</div>'
+        "</div>"
+    )
+
+
 def render_breakout_item(hit):
     pair = html.escape(str(hit["pair"]))
     signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M %Z")
@@ -692,18 +713,18 @@ def render_breakout_item(hit):
             f" at {hit['confirmation_close']:.8g}"
         )
 
-    return (
-        f"<li><strong>{pair}</strong> {hit['direction']} breakout"
-        f" · move {hit['price_change_pct']:+.2f}%"
-        f" · close {hit['close']:.8g}"
-        f" · level {hit['breakout_level']:.8g}"
-        f" · breakout {hit['breakout_strength_atr']:.2f} ATR"
+    headline = f"{hit['direction']} breakout {hit['price_change_pct']:+.2f}%"
+    detail = (
+        f"close {hit['close']:.8g}"
+        f" · level {hit['breakout_level']:.8g} ({hit['breakout_strength_atr']:.2f} ATR)"
         f" · body {hit['body_ratio'] * 100:.0f}%/{hit['body_atr']:.2f} ATR"
         f" · close-at-extreme {hit['close_extreme_ratio'] * 100:.0f}%"
-        f" · quote volume ${hit['quote_volume']:,.0f}"
+        f" · volume ${hit['quote_volume']:,.0f}"
         f" ({hit['volume_multiple']:.1f}x median, z={hit['volume_robust_z']:.1f})"
-        f" · signal {signal_time}{confirmation_text}</li>"
+        f" · 24h volume ${hit['quote_volume_24h']:,.0f}"
+        f" · signal {signal_time}{confirmation_text}"
     )
+    return _render_alert_card(pair, headline, detail)
 
 
 # -----------------------------------------------------------------------------
@@ -724,6 +745,7 @@ def evaluate_volume_price_candle(pair, wsname, history, signal_candle):
     ]
     current_quote_volume = signal_candle["volume"] * signal_candle["vwap"]
     median_quote_volume = median(historical_quote_volumes)
+    quote_volume_24h = sum(historical_quote_volumes) + current_quote_volume
 
     if median_quote_volume <= 0:
         return None
@@ -746,23 +768,26 @@ def evaluate_volume_price_candle(pair, wsname, history, signal_candle):
         and median_trade_count >= MIN_MEDIAN_TRADE_COUNT
         and signal_candle["count"] >= MIN_SIGNAL_TRADE_COUNT
     )
+    passes_volume_24h = quote_volume_24h >= MIN_24H_QUOTE_VOLUME
 
     log.debug(
         "%s: price=%+.2f%% volume=%.2fx median_quote_volume=%.2f "
-        "median_trades=%.1f signal_trades=%d "
-        "filters(volume=%s price=%s liquidity=%s)",
+        "median_trades=%.1f signal_trades=%d quote_volume_24h=%.2f "
+        "filters(volume=%s price=%s liquidity=%s volume_24h=%s)",
         wsname or pair,
         price_change_pct,
         volume_multiple,
         median_quote_volume,
         median_trade_count,
         signal_candle["count"],
+        quote_volume_24h,
         passes_volume,
         passes_price,
         passes_liquidity,
+        passes_volume_24h,
     )
 
-    if not (passes_volume and passes_price and passes_liquidity):
+    if not (passes_volume and passes_price and passes_liquidity and passes_volume_24h):
         return None
 
     return {
@@ -777,6 +802,7 @@ def evaluate_volume_price_candle(pair, wsname, history, signal_candle):
         "base_volume": signal_candle["volume"],
         "quote_volume": current_quote_volume,
         "median_quote_volume": median_quote_volume,
+        "quote_volume_24h": quote_volume_24h,
         "volume_multiple": volume_multiple,
         "signal_trade_count": signal_candle["count"],
         "median_trade_count": median_trade_count,
@@ -826,14 +852,14 @@ def render_volume_surge_item(hit):
     pair = html.escape(str(hit["pair"]))
     signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M %Z")
 
-    return (
-        f"<li><strong>{pair}</strong> {hit['direction']}"
-        f" · move {hit['price_change_pct']:+.2f}%"
-        f" · close {hit['close']:.8g}"
-        f" · quote volume ${hit['quote_volume']:,.0f}"
-        f" ({hit['volume_multiple']:.1f}x median)"
-        f" · signal {signal_time}</li>"
+    headline = f"{hit['direction']} volume surge {hit['price_change_pct']:+.2f}%"
+    detail = (
+        f"close {hit['close']:.8g}"
+        f" · volume ${hit['quote_volume']:,.0f} ({hit['volume_multiple']:.1f}x median)"
+        f" · 24h volume ${hit['quote_volume_24h']:,.0f}"
+        f" · signal {signal_time}"
     )
+    return _render_alert_card(pair, headline, detail)
 
 
 # -----------------------------------------------------------------------------
@@ -874,13 +900,17 @@ def _liquidity_stats(history, signal_candle):
     historical_trade_counts = [candle["count"] for candle in volume_window]
     median_quote_volume = median(historical_quote_volumes)
     median_trade_count = median(historical_trade_counts)
+    quote_volume_24h = sum(historical_quote_volumes) + (
+        signal_candle["volume"] * signal_candle["vwap"]
+    )
 
     passes_liquidity = (not REQUIRE_LIQUIDITY_FILTER) or (
         median_quote_volume >= MIN_MEDIAN_QUOTE_VOLUME
         and median_trade_count >= MIN_MEDIAN_TRADE_COUNT
         and signal_candle["count"] >= MIN_SIGNAL_TRADE_COUNT
     )
-    return passes_liquidity
+    passes_volume_24h = quote_volume_24h >= MIN_24H_QUOTE_VOLUME
+    return passes_liquidity, passes_volume_24h, quote_volume_24h
 
 
 def _ema_closed_candles_needed():
@@ -924,23 +954,27 @@ def evaluate_ema_trend_pullback_candle(pair, wsname, closed_candles):
         and signal_candle["close"] > signal_candle["open"]
     )
 
-    passes_liquidity = _liquidity_stats(closed_candles[:-1], signal_candle)
+    passes_liquidity, passes_volume_24h, quote_volume_24h = _liquidity_stats(
+        closed_candles[:-1], signal_candle
+    )
 
     log.debug(
         "%s: ema_trend_pullback trend_up=%s slope_atr=%.2f "
-        "separation_atr=%.2f touch_distance_atr=%.2f "
-        "filters(touched=%s reclaimed=%s liquidity=%s)",
+        "separation_atr=%.2f touch_distance_atr=%.2f quote_volume_24h=%.2f "
+        "filters(touched=%s reclaimed=%s liquidity=%s volume_24h=%s)",
         wsname or pair,
         trend_up,
         slope_atr,
         separation_atr,
         touch_distance_atr,
+        quote_volume_24h,
         touched_fast_ema,
         reclaimed,
         passes_liquidity,
+        passes_volume_24h,
     )
 
-    if not (touched_fast_ema and reclaimed and passes_liquidity):
+    if not (touched_fast_ema and reclaimed and passes_liquidity and passes_volume_24h):
         return None
 
     price_change_pct = (
@@ -963,6 +997,7 @@ def evaluate_ema_trend_pullback_candle(pair, wsname, closed_candles):
         "ema_separation_atr": separation_atr,
         "trend_slope_atr": slope_atr,
         "touch_distance_atr": touch_distance_atr,
+        "quote_volume_24h": quote_volume_24h,
         "signal_time": to_display_datetime(signal_candle["time"]),
         "signal_epoch": signal_candle["time"],
     }
@@ -1000,15 +1035,18 @@ def render_ema_trend_pullback_item(hit):
     pair = html.escape(str(hit["pair"]))
     signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M %Z")
 
-    return (
-        f"<li><strong>{pair}</strong> {hit['direction']} pullback in uptrend"
-        f" · move {hit['price_change_pct']:+.2f}%"
-        f" · close {hit['close']:.8g}"
+    headline = (
+        f"{hit['direction']} pullback in uptrend {hit['price_change_pct']:+.2f}%"
+    )
+    detail = (
+        f"close {hit['close']:.8g}"
         f" · 20 EMA {hit['ema_fast']:.8g} / 50 EMA {hit['ema_slow']:.8g}"
         f" · trend slope {hit['trend_slope_atr']:+.2f} ATR/candle"
         f" · touched 20 EMA at {hit['touch_distance_atr']:.2f} ATR"
-        f" · signal {signal_time}</li>"
+        f" · 24h volume ${hit['quote_volume_24h']:,.0f}"
+        f" · signal {signal_time}"
     )
+    return _render_alert_card(pair, headline, detail)
 
 
 # -----------------------------------------------------------------------------
@@ -1061,7 +1099,9 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
 
     passes_price = price_change_pct >= MOMENTUM_PRICE_CHANGE_PCT
     passes_volume = average_signal_volume > average_baseline_volume
-    passes_liquidity = _liquidity_stats(closed_candles[:-1], signal_candle)
+    passes_liquidity, passes_volume_24h, quote_volume_24h = _liquidity_stats(
+        closed_candles[:-1], signal_candle
+    )
     passes_ema_trend = (
         signal_candle["close"] > ema_fast_now
         and signal_candle["close"] > ema_slow_now
@@ -1070,20 +1110,28 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
 
     log.debug(
         "%s: momentum_surge price=%+.2f%% signal_volume=%.2f "
-        "baseline_volume=%.2f multiple=%.2fx "
-        "filters(price=%s volume=%s liquidity=%s ema_trend=%s)",
+        "baseline_volume=%.2f multiple=%.2fx quote_volume_24h=%.2f "
+        "filters(price=%s volume=%s liquidity=%s ema_trend=%s volume_24h=%s)",
         wsname or pair,
         price_change_pct,
         average_signal_volume,
         average_baseline_volume,
         volume_multiple,
+        quote_volume_24h,
         passes_price,
         passes_volume,
         passes_liquidity,
         passes_ema_trend,
+        passes_volume_24h,
     )
 
-    if not (passes_price and passes_volume and passes_liquidity and passes_ema_trend):
+    if not (
+        passes_price
+        and passes_volume
+        and passes_liquidity
+        and passes_ema_trend
+        and passes_volume_24h
+    ):
         return None
 
     return {
@@ -1098,6 +1146,7 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
         "average_signal_volume": average_signal_volume,
         "average_baseline_volume": average_baseline_volume,
         "volume_multiple": volume_multiple,
+        "quote_volume_24h": quote_volume_24h,
         "signal_time": to_display_datetime(signal_candle["time"]),
         "signal_epoch": signal_candle["time"],
     }
@@ -1143,13 +1192,15 @@ def render_momentum_surge_item(hit):
     pair = html.escape(str(hit["pair"]))
     signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M %Z")
 
-    return (
-        f"<li><strong>{pair}</strong> {hit['direction']} momentum"
-        f" · {MOMENTUM_CANDLE_COUNT}-candle move {hit['price_change_pct']:+.2f}%"
-        f" · close {hit['close']:.8g}"
+    headline = f"{hit['direction']} momentum {hit['price_change_pct']:+.2f}%"
+    detail = (
+        f"close {hit['close']:.8g}"
+        f" · {MOMENTUM_CANDLE_COUNT}-candle move"
         f" · volume {hit['volume_multiple']:.2f}x {MOMENTUM_VOLUME_LOOKBACK}-candle average"
-        f" · signal {signal_time}</li>"
+        f" · 24h volume ${hit['quote_volume_24h']:,.0f}"
+        f" · signal {signal_time}"
     )
+    return _render_alert_card(pair, headline, detail)
 
 
 # -----------------------------------------------------------------------------
@@ -1262,9 +1313,9 @@ def build_combined_email(hits_by_analysis, interval_minutes, require_next_candle
 
     subject_parts = []
     lines = [
-        "<html><body>",
-        "<h2>Kraken Crypto Alerts</h2>",
-        f"<p><strong>Interval:</strong> {html.escape(label)}</p>",
+        '<html><body style="font-family:-apple-system,Arial,sans-serif;">',
+        '<h2 style="margin-bottom:4px;">Kraken Crypto Alerts</h2>',
+        f'<p style="color:#555;margin-top:0;"><strong>Interval:</strong> {html.escape(label)}</p>',
     ]
 
     for spec in ANALYSES:
@@ -1273,11 +1324,15 @@ def build_combined_email(hits_by_analysis, interval_minutes, require_next_candle
             continue
 
         subject_parts.append(f"{len(hits)} {spec['section_title'].lower()}")
-        lines.append(f"<h3>{html.escape(spec['section_title'])} ({len(hits)})</h3>")
-        lines.append(spec["section_intro"](confirm_label))
-        lines.append("<ul>")
+        lines.append(
+            '<h3 style="border-bottom:2px solid #2e7d32;padding-bottom:4px;'
+            f'margin-top:28px;">{html.escape(spec["section_title"])} ({len(hits)})</h3>'
+        )
+        lines.append(
+            '<div style="font-size:12.5px;color:#777;margin:2px 0 4px 0;">'
+            f'{spec["section_intro"](confirm_label)}</div>'
+        )
         lines.extend(spec["render_item"](hit) for hit in hits)
-        lines.append("</ul>")
 
     lines.extend(["</body></html>"])
     subject = f"Kraken Alerts: {', '.join(subject_parts)} ({label})"

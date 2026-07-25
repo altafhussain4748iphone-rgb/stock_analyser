@@ -42,6 +42,13 @@ MIN_VOLUME_MULTIPLE = 2.0
 MIN_VOLUME_ROBUST_Z = 3.0
 MIN_MEDIAN_QUOTE_VOLUME = 1_000.0
 
+# Absolute 24h liquidity floor, applied to every alert type regardless of
+# REQUIRE_LIQUIDITY_FILTER. Uses the same 24h (VOLUME_LOOKBACK) window as the
+# liquidity filters above, but summed rather than medianed -- this is the
+# "24h volume" figure a trader would recognize from an exchange ticker, and
+# is also surfaced on every alert for manual review.
+MIN_24H_QUOTE_VOLUME = 100_000.0
+
 # Liquidity/activity filters. Enable once you've picked floors
 # (MIN_MEDIAN_QUOTE_VOLUME, MIN_MEDIAN_TRADE_COUNT, MIN_SIGNAL_TRADE_COUNT)
 # that fit the pairs you trade.
