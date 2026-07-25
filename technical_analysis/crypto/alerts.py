@@ -47,6 +47,7 @@ from technical_analysis.crypto.config import (
     REQUEST_RETRIES,
     REQUEST_RETRY_DELAY_SEC,
     REQUEST_TIMEOUT_SEC,
+    REQUIRE_LIQUIDITY_FILTER,
     VALID_INTERVALS,
     VOLUME_LOOKBACK,
     VOLUME_SPIKE_MULTIPLE,
@@ -509,7 +510,7 @@ def evaluate_signal_candle(pair, wsname, history, signal_candle):
         volume_multiple >= MIN_VOLUME_MULTIPLE
         and volume_robust_z >= MIN_VOLUME_ROBUST_Z
     )
-    passes_liquidity = (
+    passes_liquidity = (not REQUIRE_LIQUIDITY_FILTER) or (
         median_quote_volume >= MIN_MEDIAN_QUOTE_VOLUME
         and median_trade_count >= MIN_MEDIAN_TRADE_COUNT
         and signal_candle["count"] >= MIN_SIGNAL_TRADE_COUNT
@@ -740,7 +741,7 @@ def evaluate_volume_price_candle(pair, wsname, history, signal_candle):
 
     passes_volume = volume_multiple >= VOLUME_SPIKE_MULTIPLE
     passes_price = price_change_pct >= PRICE_CHANGE_ALERT_PCT
-    passes_liquidity = (
+    passes_liquidity = (not REQUIRE_LIQUIDITY_FILTER) or (
         median_quote_volume >= MIN_MEDIAN_QUOTE_VOLUME
         and median_trade_count >= MIN_MEDIAN_TRADE_COUNT
         and signal_candle["count"] >= MIN_SIGNAL_TRADE_COUNT
@@ -874,7 +875,7 @@ def _liquidity_stats(history, signal_candle):
     median_quote_volume = median(historical_quote_volumes)
     median_trade_count = median(historical_trade_counts)
 
-    passes_liquidity = (
+    passes_liquidity = (not REQUIRE_LIQUIDITY_FILTER) or (
         median_quote_volume >= MIN_MEDIAN_QUOTE_VOLUME
         and median_trade_count >= MIN_MEDIAN_TRADE_COUNT
         and signal_candle["count"] >= MIN_SIGNAL_TRADE_COUNT

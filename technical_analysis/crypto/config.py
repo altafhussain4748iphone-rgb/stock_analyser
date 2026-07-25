@@ -42,7 +42,10 @@ MIN_VOLUME_MULTIPLE = 2.0
 MIN_VOLUME_ROBUST_Z = 3.0
 MIN_MEDIAN_QUOTE_VOLUME = 12_500.0
 
-# Liquidity/activity filters.
+# Liquidity/activity filters. Off by default; enable once you've picked
+# floors (MIN_MEDIAN_QUOTE_VOLUME, MIN_MEDIAN_TRADE_COUNT,
+# MIN_SIGNAL_TRADE_COUNT) that fit the pairs you trade.
+REQUIRE_LIQUIDITY_FILTER = False
 MIN_MEDIAN_TRADE_COUNT = 5
 MIN_SIGNAL_TRADE_COUNT = 5
 
