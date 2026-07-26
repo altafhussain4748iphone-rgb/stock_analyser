@@ -124,3 +124,37 @@ EMA_PULLBACK_TOUCH_ATR = 0.35
 MOMENTUM_CANDLE_COUNT = 5
 MOMENTUM_VOLUME_LOOKBACK = 20
 MOMENTUM_PRICE_CHANGE_PCT = 5.0
+
+
+# -----------------------------------------------------------------------------
+# 9 EMA pullback settings
+#
+# "ema9_pullback": the same "buy the dip in an uptrend" idea as
+# ema_trend_pullback, but keyed off the faster 9/21 EMA pair instead of
+# 20/50. A 50 EMA trend takes hours to establish, so ema_trend_pullback can
+# miss the *first* pullback after a fresh impulse move (e.g. a momentum_surge
+# hit) -- by the time its trend filter confirms, that early, better-risk/
+# reward dip is often already gone. The 9/21 pair reacts fast enough to catch
+# it, at the cost of being noisier. Reuses the liquidity filters from the
+# breakout analysis.
+# -----------------------------------------------------------------------------
+
+EMA9_FAST_PERIOD = 9
+EMA9_SLOW_PERIOD = 21
+EMA9_WARMUP_CANDLES = EMA9_SLOW_PERIOD * 3
+
+# Tighter than EMA_MIN_SEPARATION_ATR since the 9/21 pair naturally sits
+# closer together (in ATR terms) than 20/50 even in a real trend.
+EMA9_MIN_SEPARATION_ATR = 0.20
+
+# Shorter than EMA_TREND_LOOKBACK -- this pair should confirm a trend within
+# ~1.5 hours on 15m candles, not multiple hours.
+EMA9_TREND_LOOKBACK = 6
+
+# Higher than EMA_MIN_SLOPE_ATR: the 21 EMA moves faster than the 50 EMA, so
+# a real trend clears a higher ATR/candle bar here.
+EMA9_MIN_SLOPE_ATR = 0.08
+
+# Tighter than EMA_PULLBACK_TOUCH_ATR since the 9 EMA hugs price more closely
+# than the 20 EMA does.
+EMA9_PULLBACK_TOUCH_ATR = 0.30

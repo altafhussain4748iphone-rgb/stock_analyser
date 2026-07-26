@@ -1,9 +1,9 @@
 # Crypto Alert Strategies
 
-`technical_analysis/crypto/alerts.py` runs four independent analyses against
+`technical_analysis/crypto/alerts.py` runs five independent analyses against
 one shared Kraken 15-minute candle fetch per pair (see the `ANALYSES`
 registry). Each scan sends **one combined email** with a section per analysis
-that had hits. All four only alert on upside signals — no DOWN/bearish
+that had hits. All five only alert on upside signals — no DOWN/bearish
 alerts are sent. This document explains what each analysis actually checks
 and walks through example trades in a few different market scenarios —
 including scenarios where the strategy is *wrong*, since that's just as
@@ -13,6 +13,19 @@ None of this is a backtested, guaranteed-profitable system. These are
 alerting heuristics built on well-established technical trading logic. Treat
 every example below as illustrating the *mechanism*, not a promise of the
 outcome.
+
+### Two liquidity filters apply to all five analyses
+
+- **Per-candle liquidity filter** (`REQUIRE_LIQUIDITY_FILTER`, currently
+  **on**): median quote volume over the trailing 96 candles ≥ **$1,000**,
+  median trade count ≥ 5, and the signal candle itself ≥ 5 trades. Tables
+  below list this as "Liquidity floor."
+- **Absolute 24h volume floor** (`MIN_24H_QUOTE_VOLUME`, always enforced
+  regardless of the flag above): trailing 24h quote volume ≥ **$500,000**.
+  This is a coarser "is this pair even worth alerting on" check — a sum, not
+  a median, so it can't be skewed low by one quiet candle — and its value is
+  printed on every alert (`24h volume $X`) so you can sanity-check liquidity
+  without cross-referencing anything.
 
 ---
 
@@ -30,7 +43,8 @@ that pokes through and fades.
 | Close location in candle | ≥ 75% toward the extreme |
 | Body size | ≥ 0.80 × ATR |
 | Volume vs 96-candle median | ≥ 2.0× **and** robust z-score ≥ 3.0 |
-| Liquidity floor | median quote volume ≥ $12,500, ≥5 trades/candle |
+| Liquidity floor | median quote volume ≥ $1,000, ≥5 trades/candle |
+| 24h volume floor | ≥ $500,000 |
 | Cooldown | 4 candles per pair |
 
 ### Scenario A — the intended win: volume-backed breakout continues
@@ -87,6 +101,7 @@ design.
 | Volume vs 96-candle median | ≥ 3.0× |
 | Absolute price move on the candle | ≥ 1.5% |
 | Liquidity floor | same as breakout |
+| 24h volume floor | same as breakout |
 | Cooldown | 4 candles per pair |
 
 ### Scenario A — the intended catch: news/whale activity
@@ -130,6 +145,7 @@ extended breakout.
 | Pullback touch distance to 20 EMA | ≤ 0.35 × ATR |
 | Reclaim | signal candle must close back beyond the 20 EMA, same direction as the trend |
 | Liquidity floor | same as breakout |
+| 24h volume floor | same as breakout |
 
 ### Scenario A — the intended win: low-risk trend continuation entry
 
@@ -176,6 +192,7 @@ a longer baseline?
 | Price move over last 5 candles | ≥ 5.0% (open of the 5-candle window to close of the last) |
 | Average volume over those 5 candles | > average volume over the last 20 candles |
 | Liquidity floor | same as breakout |
+| 24h volume floor | same as breakout |
 | Cooldown | 4 candles per pair |
 
 Note the 20-candle baseline *includes* the 5 signal candles — it isn't a
@@ -205,11 +222,75 @@ A pair moves +6% over 5 candles, but volume on those candles is actually
 participation). **No alert** — the volume condition is the one thing keeping
 this analysis from firing on random 5%+ chop.
 
+### Scenario D — correctly does *not* fire (today): real move, too thin to matter
+
+This one is real data, not a hypothetical. GWEI/USD on 2026-07-24 14:45 UTC:
+5-candle move **+5.21%**, 5-candle average volume running **1.53×** the
+20-candle baseline, price above both EMAs with the 20 EMA above the 50 EMA —
+every momentum/EMA condition passes. But this pair's trailing 24h quote
+volume at that moment was only **$192,165** — comfortably above the old
+$100,000 floor, but now well under the current **$500,000** floor. **No
+alert.** The move was genuine, but a pair doing under $200k/day in volume
+isn't liquid enough to act on at any real size — this is exactly the
+"real signal, wrong pair" case the 24h floor exists to catch.
+
+---
+
+## 5. 9 EMA Pullback (`ema9_pullback`)
+
+**What it checks:** the same "buy the dip in an uptrend" idea as
+`ema_trend_pullback`, but keyed off the faster 9/21 EMA pair instead of
+20/50. A 50 EMA trend takes hours to establish, so `ema_trend_pullback` can
+miss the *first* pullback after a fresh impulse move — e.g. a
+`momentum_surge` hit, which by definition is only 5 candles (75 minutes on
+15m) old — because by the time the 50 EMA trend filter confirms, that
+early, better-risk/reward dip is often already gone. This analysis exists to
+close that gap: spot the mover with `momentum_surge`, then let this fire on
+the earliest pullback worth buying.
+
+| Filter | Threshold |
+|---|---|
+| Trend defined by 21 EMA slope | ≥ 0.08 × ATR per candle (over a 6-candle lookback) |
+| EMA separation (not tangled/flat) | ≥ 0.20 × ATR |
+| Pullback touch distance to 9 EMA | ≤ 0.30 × ATR |
+| Reclaim | signal candle must close back beyond the 9 EMA, same direction as the trend |
+| Liquidity floor | same as breakout |
+| 24h volume floor | same as breakout |
+
+### Scenario A — the intended win: catching the first dip after a fresh impulse
+
+DOGE/USD just fired a `momentum_surge` alert 30 minutes ago (+6% over 5
+candles). The 21 EMA is now rising at 0.15 ATR/candle (above the 0.08
+minimum) and sits 0.9 ATR below the 9 EMA (above the 0.20 separation
+minimum) — a trend by this faster pair's definition, even though it's far
+too young to register on the slower 50 EMA. Price pulls back for one red
+candle to within 0.10 ATR of the 9 EMA, then closes back up above it.
+**Alert fires: UP.** This is the entry `ema_trend_pullback` would have
+missed — its 50 EMA trend filter wouldn't confirm for hours yet.
+
+### Scenario B — the failure mode: same "one pullback too many" problem, faster
+
+Because the 9/21 pair reacts quickly, it also *ends* its read on a trend
+quickly. A token chops through several shallow pullback-and-bounce cycles in
+under two hours, each one firing its own alert once cooldown clears. The
+third one looks identical to the first but is actually the top — the 9 EMA
+gets broken on the next candle and the move is over. Same blind spot as
+`ema_trend_pullback` (no concept of "which pullback in the trend is this"),
+just compressed into a much shorter window, so acting on every hit here is
+riskier than acting on every `ema_trend_pullback` hit.
+
+### Scenario C — correctly does *not* fire: trend too young/flat by this pair's own bar
+
+A pair has moved sideways-to-slightly-up for the last few candles — 21 EMA
+slope is only 0.03 ATR/candle (below the 0.08 minimum). **No alert**, even
+though price is technically drifting up, because there isn't yet a real
+trend to call this a "pullback within."
+
 ---
 
 ## The honest caveat
 
-All four analyses encode reasonable, standard technical-trading logic, but:
+All five analyses encode reasonable, standard technical-trading logic, but:
 
 - **None of it executes trades.** There's no position sizing, stop-loss, or
   exit logic — these are alerts, not an automated strategy.
@@ -223,5 +304,6 @@ All four analyses encode reasonable, standard technical-trading logic, but:
 
 Before sizing real money behind any of these alerts, backtest it on your own
 watchlist, and consider combining signals (e.g. only act on an
-`ema_trend_pullback` alert that also has a recent `breakout` in the same
-pair) rather than trading any one analysis in isolation.
+`ema9_pullback` alert that follows a recent `momentum_surge` hit in the same
+pair, or an `ema_trend_pullback` alert that also has a recent `breakout`)
+rather than trading any one analysis in isolation.

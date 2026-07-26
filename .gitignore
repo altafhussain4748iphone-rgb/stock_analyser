@@ -2,6 +2,7 @@
 __pycache__/
 env/
 google_credentials.json
+data/
 
 # Terraform (the .terraform.lock.hcl provider lockfile IS committed)
 terraform/.terraform/
