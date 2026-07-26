@@ -37,6 +37,13 @@ MIN_BODY_RATIO = 0.60
 MIN_CLOSE_LOCATION = 0.75
 MIN_BODY_ATR = 0.80
 
+# Absolute price-move floor (open->close of the signal candle), on top of
+# the ATR-relative filters above. The ATR filters alone can pass on a move
+# that's economically tiny in % terms for a low-volatility, high-price pair
+# (e.g. BTC) -- this catches that case, same idea as PRICE_CHANGE_ALERT_PCT
+# on volume_surge.
+BREAKOUT_MIN_PRICE_CHANGE_PCT = 1.0
+
 # Robust quote-volume filters.
 MIN_VOLUME_MULTIPLE = 2.0
 MIN_VOLUME_ROBUST_Z = 3.0

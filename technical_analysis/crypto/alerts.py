@@ -20,6 +20,7 @@ from technical_analysis.crypto.config import (
     ATR_PERIOD,
     BREAKOUT_BUFFER_ATR,
     BREAKOUT_LOOKBACK,
+    BREAKOUT_MIN_PRICE_CHANGE_PCT,
     CONFIRM_RETEST_TOLERANCE_ATR,
     COOLDOWN_CANDLES,
     DEFAULT_REQUIRE_NEXT_CANDLE_CONFIRMATION,
@@ -527,6 +528,7 @@ def evaluate_signal_candle(pair, wsname, history, signal_candle):
 
     passes_conviction = body_ratio >= MIN_BODY_RATIO
     passes_move = body_atr >= MIN_BODY_ATR
+    passes_price_change = price_change_pct >= BREAKOUT_MIN_PRICE_CHANGE_PCT
     passes_volume = (
         volume_multiple >= MIN_VOLUME_MULTIPLE
         and volume_robust_z >= MIN_VOLUME_ROBUST_Z
@@ -543,7 +545,7 @@ def evaluate_signal_candle(pair, wsname, history, signal_candle):
         "close_location=%.2f breakout_atr=%.2f volume=%.2fx z=%.2f "
         "median_quote_volume=%.2f median_trades=%.1f signal_trades=%d "
         "quote_volume_24h=%.2f "
-        "filters(conviction=%s move=%s volume=%s liquidity=%s volume_24h=%s)",
+        "filters(conviction=%s move=%s price_change=%s volume=%s liquidity=%s volume_24h=%s)",
         wsname or pair,
         direction,
         price_change_pct,
@@ -559,6 +561,7 @@ def evaluate_signal_candle(pair, wsname, history, signal_candle):
         quote_volume_24h,
         passes_conviction,
         passes_move,
+        passes_price_change,
         passes_volume,
         passes_liquidity,
         passes_volume_24h,
@@ -567,6 +570,7 @@ def evaluate_signal_candle(pair, wsname, history, signal_candle):
     if not (
         passes_conviction
         and passes_move
+        and passes_price_change
         and passes_volume
         and passes_liquidity
         and passes_volume_24h
@@ -1420,7 +1424,8 @@ ANALYSES = [
         "log_hit": log_breakout_hit,
         "render_item": render_breakout_item,
         "section_intro": lambda confirm_label: (
-            "<p>Signals passed range, ATR, candle-quality, robust-volume, and "
+            "<p>Signals passed range, ATR, candle-quality, robust-volume, "
+            f"a &gt;= {BREAKOUT_MIN_PRICE_CHANGE_PCT:.1f}% price move, and "
             f"liquidity filters ({html.escape(confirm_label)}).</p>"
         ),
     },

@@ -42,6 +42,7 @@ that pokes through and fades.
 | Candle body / range | ≥ 60% (not a doji or long-wick candle) |
 | Close location in candle | ≥ 75% toward the extreme |
 | Body size | ≥ 0.80 × ATR |
+| Price move (open→close) | ≥ 1.0% |
 | Volume vs 96-candle median | ≥ 2.0× **and** robust z-score ≥ 3.0 |
 | Liquidity floor | median quote volume ≥ $1,000, ≥5 trades/candle |
 | 24h volume floor | ≥ $500,000 |
@@ -51,17 +52,18 @@ that pokes through and fades.
 
 BTC/USD has chopped between $60,000–$60,500 for 5 hours. ATR ≈ $150.
 
-A candle prints: open $60,480 → close $60,690, high $60,700, low $60,470.
+A candle prints: open $60,480 → close $61,150, high $61,200, low $60,470.
 
-- Body = $210 = **1.4× ATR** (clears the 0.80 minimum)
+- Body = $670 = **4.5× ATR** (clears the 0.80 minimum)
+- Price move is **+1.11%** (clears the 1.0% minimum)
 - Close is 96% of the way to the candle's high (clears the 75% minimum)
-- Clears the range ($60,500) by $190, well past the $22.50 ATR buffer
+- Clears the range ($60,500) by $650, well past the $22.50 ATR buffer
 - Volume on the candle is 3.2× the 24h median, robust z-score 4.1
 
 **Alert fires: UP breakout.** Real size pushed price out of the range and
 held it near the high — stop-losses from range-bound shorts trigger,
 trend-followers who watch this exact pattern start buying, price grinds up
-toward $61,000+ over the next few hours. This is the case the strategy is
+toward $62,000+ over the next few hours. This is the case the strategy is
 designed to catch.
 
 ### Scenario B — the failure mode: exhaustion candle looks identical
@@ -87,6 +89,20 @@ SOL/USD grinds out of its 20-candle range with a similarly strong candle
 these fail immediately because no real size is behind the move — and the
 volume/liquidity filters are specifically what keep the analysis from firing
 on it.
+
+### Scenario D — correctly does *not* fire: ATR-valid breakout, economically too small
+
+BTC/USD chops the same $60,000–$60,500 range, ATR ≈ $150. A candle prints
+open $60,480 → close $60,690, high $60,700, low $60,470 — body $210 (1.4×
+ATR, clears the 0.80 minimum), closes 96% toward the high, clears the range
+by $190 (past the ATR buffer), volume 3.2× median with robust z-score 4.1.
+Every ATR-relative and volume filter passes. But the price move is only
+**+0.35%** — below the 1.0% floor. **No alert.** On a low-volatility,
+high-price pair like BTC, the ATR filters alone can validate a move that's
+too small to be worth trading after fees and slippage; the price-move floor
+exists specifically to catch that gap. (This is the exact candle from an
+earlier draft of Scenario A, before the 1.0% floor was added — it used to
+fire.)
 
 ---
 
