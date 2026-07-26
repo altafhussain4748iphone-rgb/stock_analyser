@@ -21,7 +21,7 @@ outcome.
   median trade count ≥ 5, and the signal candle itself ≥ 5 trades. Tables
   below list this as "Liquidity floor."
 - **Absolute 24h volume floor** (`MIN_24H_QUOTE_VOLUME`, always enforced
-  regardless of the flag above): trailing 24h quote volume ≥ **$500,000**.
+  regardless of the flag above): trailing 24h quote volume ≥ **$200,000**.
   This is a coarser "is this pair even worth alerting on" check — a sum, not
   a median, so it can't be skewed low by one quiet candle — and its value is
   printed on every alert (`24h volume $X`) so you can sanity-check liquidity
@@ -45,7 +45,7 @@ that pokes through and fades.
 | Price move (open→close) | ≥ 1.0% |
 | Volume vs 96-candle median | ≥ 2.0× **and** robust z-score ≥ 3.0 |
 | Liquidity floor | median quote volume ≥ $1,000, ≥5 trades/candle |
-| 24h volume floor | ≥ $500,000 |
+| 24h volume floor | ≥ $200,000 |
 | Cooldown | 4 candles per pair |
 
 ### Scenario A — the intended win: volume-backed breakout continues
@@ -244,11 +244,11 @@ This one is real data, not a hypothetical. GWEI/USD on 2026-07-24 14:45 UTC:
 5-candle move **+5.21%**, 5-candle average volume running **1.53×** the
 20-candle baseline, price above both EMAs with the 20 EMA above the 50 EMA —
 every momentum/EMA condition passes. But this pair's trailing 24h quote
-volume at that moment was only **$192,165** — comfortably above the old
-$100,000 floor, but now well under the current **$500,000** floor. **No
-alert.** The move was genuine, but a pair doing under $200k/day in volume
-isn't liquid enough to act on at any real size — this is exactly the
-"real signal, wrong pair" case the 24h floor exists to catch.
+volume at that moment was only **$192,165** — just under the current
+**$200,000** floor. **No alert.** The move was genuine, but a pair doing
+under $200k/day in volume isn't liquid enough to act on at any real size —
+this is exactly the "real signal, wrong pair" case the 24h floor exists to
+catch.
 
 ---
 
