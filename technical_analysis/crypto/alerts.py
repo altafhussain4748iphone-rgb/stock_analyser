@@ -1059,7 +1059,7 @@ def render_ema_trend_pullback_item(hit):
     signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M %Z")
 
     headline = (
-        f"{hit['direction']} pullback in uptrend {hit['price_change_pct']:+.2f}%"
+        f"{hit['direction']} 20 EMA pullback in uptrend {hit['price_change_pct']:+.2f}%"
     )
     detail = (
         f"close {format_price(hit['close'])}"
@@ -1222,7 +1222,7 @@ def render_ema9_pullback_item(hit):
     signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M %Z")
 
     headline = (
-        f"{hit['direction']} pullback in uptrend {hit['price_change_pct']:+.2f}%"
+        f"{hit['direction']} 9 EMA pullback in uptrend {hit['price_change_pct']:+.2f}%"
     )
     detail = (
         f"close {format_price(hit['close'])}"
@@ -1444,7 +1444,7 @@ ANALYSES = [
     },
     {
         "key": "ema_trend_pullback",
-        "section_title": "EMA Trend Pullback Alerts",
+        "section_title": "20 EMA Pullback Alerts",
         "run": run_ema_trend_pullback_analysis,
         "sort_key": lambda hit: abs(hit["trend_slope_atr"]),
         "log_hit": log_ema_trend_pullback_hit,
