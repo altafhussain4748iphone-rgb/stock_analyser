@@ -6,6 +6,17 @@ KRAKEN_API_URL = "https://api.kraken.com/0/public"
 VALID_INTERVALS = (1, 5, 15, 30, 60, 240, 1440, 10080, 21600)
 QUOTE_FILTER = ("USD", "USDT")
 
+# Base currencies to skip entirely -- these pairs are never fetched or
+# scanned by any analysis. Matched case-insensitively against the base
+# symbol in Kraken's wsname (the part before "/"), which is stable across
+# Kraken's legacy pair-key naming quirks (e.g. the pair key for BTC/USD is
+# XXBTZUSD, but its wsname base is "XBT"). Both "XBT" and "BTC" are listed
+# since Kraken itself only ever uses "XBT", but a stray listing could use
+# either.
+SKIP_BASE_CURRENCIES = frozenset({
+    "HYPE", "XBT", "BTC", "SOL", "ETH", "LINK", "TAO", "AAVE", "UNI", "XRP",
+})
+
 REQUEST_TIMEOUT_SEC = 15
 REQUEST_RETRIES = 3
 REQUEST_RETRY_DELAY_SEC = 1.5

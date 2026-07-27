@@ -58,6 +58,7 @@ from technical_analysis.crypto.config import (
     REQUEST_RETRY_DELAY_SEC,
     REQUEST_TIMEOUT_SEC,
     REQUIRE_LIQUIDITY_FILTER,
+    SKIP_BASE_CURRENCIES,
     VALID_INTERVALS,
     VOLUME_LOOKBACK,
     VOLUME_SPIKE_MULTIPLE,
@@ -152,6 +153,27 @@ def format_price(value, sig_figs=4):
     magnitude = math.floor(math.log10(abs(value)))
     decimals = max(0, sig_figs - 1 - magnitude)
     return f"{value:,.{decimals}f}"
+
+
+def format_compact_volume(value):
+    """Format a dollar volume compactly (e.g. $812.45M, $200K) instead of
+    a long digit string like $812,450,000 -- easier to scan in an email."""
+    sign = "-" if value < 0 else ""
+    value = abs(value)
+
+    if value >= 1_000_000_000:
+        number, suffix = value / 1_000_000_000, "B"
+    elif value >= 1_000_000:
+        number, suffix = value / 1_000_000, "M"
+    elif value >= 1_000:
+        number, suffix = value / 1_000, "K"
+    else:
+        return f"{sign}${value:,.0f}"
+
+    text = f"{number:.2f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return f"{sign}${text}{suffix}"
 
 
 def _gcs_state_blob():
@@ -744,7 +766,7 @@ def render_breakout_item(hit):
         f" · close-at-extreme {hit['close_extreme_ratio'] * 100:.0f}%"
         f" · volume ${hit['quote_volume']:,.0f}"
         f" ({hit['volume_multiple']:.1f}x median, z={hit['volume_robust_z']:.1f})"
-        f" · 24h volume ${hit['quote_volume_24h']:,.0f}"
+        f" · 24h volume {format_compact_volume(hit['quote_volume_24h'])}"
         f" · signal {signal_time}{confirmation_text}"
     )
     return _render_alert_card(pair, headline, detail)
@@ -879,7 +901,7 @@ def render_volume_surge_item(hit):
     detail = (
         f"close {format_price(hit['close'])}"
         f" · volume ${hit['quote_volume']:,.0f} ({hit['volume_multiple']:.1f}x median)"
-        f" · 24h volume ${hit['quote_volume_24h']:,.0f}"
+        f" · 24h volume {format_compact_volume(hit['quote_volume_24h'])}"
         f" · signal {signal_time}"
     )
     return _render_alert_card(pair, headline, detail)
@@ -1066,7 +1088,7 @@ def render_ema_trend_pullback_item(hit):
         f" · 20 EMA {format_price(hit['ema_fast'])} / 50 EMA {format_price(hit['ema_slow'])}"
         f" · trend slope {hit['trend_slope_atr']:+.2f} ATR/candle"
         f" · touched 20 EMA at {hit['touch_distance_atr']:.2f} ATR"
-        f" · 24h volume ${hit['quote_volume_24h']:,.0f}"
+        f" · 24h volume {format_compact_volume(hit['quote_volume_24h'])}"
         f" · signal {signal_time}"
     )
     return _render_alert_card(pair, headline, detail)
@@ -1229,7 +1251,7 @@ def render_ema9_pullback_item(hit):
         f" · 9 EMA {format_price(hit['ema_fast'])} / 21 EMA {format_price(hit['ema_slow'])}"
         f" · trend slope {hit['trend_slope_atr']:+.2f} ATR/candle"
         f" · touched 9 EMA at {hit['touch_distance_atr']:.2f} ATR"
-        f" · 24h volume ${hit['quote_volume_24h']:,.0f}"
+        f" · 24h volume {format_compact_volume(hit['quote_volume_24h'])}"
         f" · signal {signal_time}"
     )
     return _render_alert_card(pair, headline, detail)
@@ -1383,7 +1405,7 @@ def render_momentum_surge_item(hit):
         f"close {format_price(hit['close'])}"
         f" · {MOMENTUM_CANDLE_COUNT}-candle move"
         f" · volume {hit['volume_multiple']:.2f}x {MOMENTUM_VOLUME_LOOKBACK}-candle average"
-        f" · 24h volume ${hit['quote_volume_24h']:,.0f}"
+        f" · 24h volume {format_compact_volume(hit['quote_volume_24h'])}"
         f" · signal {signal_time}"
     )
     return _render_alert_card(pair, headline, detail)
@@ -1621,6 +1643,18 @@ def scan_once(interval_minutes, require_next_candle_confirmation=False):
             interval_minutes=interval_minutes,
         )
         return {}
+
+    if SKIP_BASE_CURRENCIES:
+        before_count = len(pairs)
+        pairs = {
+            pair_key: wsname
+            for pair_key, wsname in pairs.items()
+            if wsname.split("/", 1)[0].upper() not in SKIP_BASE_CURRENCIES
+        }
+        log.info(
+            "Skipped %d pair(s) in SKIP_BASE_CURRENCIES.",
+            before_count - len(pairs),
+        )
 
     log.info(
         "Scanning %d pairs (quote filter=%s)...",
