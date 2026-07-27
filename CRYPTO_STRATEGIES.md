@@ -17,26 +17,24 @@ outcome.
 ### Two liquidity filters apply to all five analyses
 
 - **Per-candle liquidity filter** (`REQUIRE_LIQUIDITY_FILTER`, currently
-  **off**): when on, requires median quote volume over the trailing 96
-  candles ≥ **$1,000**, median trade count ≥ 5, and the signal candle itself
-  ≥ 5 trades. Tables below list this as "Liquidity floor." With it off, only
-  `ema_trend_pullback`, `momentum_surge`, and `ema9_pullback` actually alert
-  on pairs that would have failed this check — see the note below on why
-  `breakout` and `volume_surge` don't.
+  **on**): median quote volume over the trailing 96 candles ≥ **$1,000**,
+  median trade count ≥ 5, and the signal candle itself ≥ 5 trades. Tables
+  below list this as "Liquidity floor." Applies to all five analyses.
 - **Absolute 24h volume floor** (`MIN_24H_QUOTE_VOLUME`, always enforced
   regardless of the flag above): trailing 24h quote volume ≥ **$100,000**.
   This is a coarser "is this pair even worth alerting on" check — a sum, not
   a median, so it can't be skewed low by one quiet candle — and its value is
   printed on every alert (`24h volume $X`) so you can sanity-check liquidity
   without cross-referencing anything.
-- **`breakout` and `volume_surge` have one more, non-optional guard**: both
-  divide the signal candle's volume by the trailing 96-candle *median*
-  volume to compute a volume multiple. If that median is exactly **$0**
-  (more than half the trailing candles had zero trades — a dead pair), the
-  division is skipped and the function returns no hit, regardless of
-  `REQUIRE_LIQUIDITY_FILTER`. This isn't the configurable liquidity filter —
-  it's a structural guard against dividing by zero. Turning
-  `REQUIRE_LIQUIDITY_FILTER` off does not change this.
+- **`breakout` and `volume_surge` have one more, non-optional guard** on top
+  of both filters above: both divide the signal candle's volume by the
+  trailing 96-candle *median* volume to compute a volume multiple. If that
+  median is exactly **$0** (more than half the trailing candles had zero
+  trades — a dead pair), the division is skipped and the function returns no
+  hit, regardless of `REQUIRE_LIQUIDITY_FILTER`. This is a structural guard
+  against dividing by zero, not the configurable liquidity filter — so even
+  if you turn `REQUIRE_LIQUIDITY_FILTER` off, these two analyses still won't
+  alert on a pair whose trailing volume is entirely zero.
 
 ---
 
@@ -261,22 +259,22 @@ floor has been lowered specifically to let real-but-thinner moves like this
 one through — the tradeoff is accepting more pairs in the "some liquidity,
 but not a lot" range.
 
-`REQUIRE_LIQUIDITY_FILTER` is now **off**, so `momentum_surge` (and
-`ema_trend_pullback`, `ema9_pullback`) no longer check the trailing-96-candle
-median at all — only the 24h floor and each analysis's own shape filters
-apply. `breakout` and `volume_surge` are different: ESP/USD's 2026-07-26
-10:00am spike (+25% on the candle, $110k volume, 438 trades on that candle
-alone) had a trailing 24h volume of $128,265 — well above the $100,000
-floor — but still got **no alert** on either of those two, because 54 of the
-96 trailing candles before it had zero volume and zero trades, making the
-trailing median quote volume exactly **$0**. Both `breakout` and
-`volume_surge` divide the signal candle's volume by that median to compute a
-volume multiple; when the median is $0 they skip the division and return no
-hit outright, regardless of `REQUIRE_LIQUIDITY_FILTER`. `momentum_surge`
-still didn't fire on this same ESP candle either, but for an unrelated
-reason — its own 5-candle price/volume window (dragged down by those same
-dead candles) didn't clear its own thresholds, not because of any liquidity
-check.
+The per-candle median liquidity filter (`REQUIRE_LIQUIDITY_FILTER`) is a
+separate, independent check from the 24h floor -- GWEI cleared it too, which
+is why lowering the 24h floor alone was enough to let this one through.
+ESP/USD's 2026-07-26 10:00am spike (+25% on the candle, $110k volume, 438
+trades on that candle alone) is the contrasting case: its trailing 24h
+volume of $128,265 was well above the $100,000 floor, but 54 of the 96
+trailing candles before it had zero volume and zero trades, so the trailing
+median quote volume was exactly **$0** -- failing the per-candle filter
+outright (median $0 vs the $1,000 minimum, median 0 trades vs the 5-trade
+minimum). **No alert** on any of the five analyses. `breakout` and
+`volume_surge` would in fact still reject ESP's spike even with
+`REQUIRE_LIQUIDITY_FILTER` turned off, since both separately divide the
+signal candle's volume by that same trailing median to compute a volume
+multiple, and skip the division (returning no hit) when the median is
+exactly $0 -- a structural guard against dividing by zero, not the
+configurable filter.
 
 ---
 
