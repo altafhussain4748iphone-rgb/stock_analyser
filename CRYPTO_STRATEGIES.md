@@ -167,18 +167,18 @@ extended breakout.
 |---|---|
 | Trend defined by 50 EMA slope | ≥ 0.05 × ATR per candle (over a 10-candle lookback) |
 | EMA separation (not tangled/flat) | ≥ 0.25 × ATR |
-| Pullback touch distance to 20 EMA | ≤ 0.35 × ATR |
-| Reclaim | signal candle must close back beyond the 20 EMA, same direction as the trend |
+| Pullback touch distance to 21 EMA | ≤ 0.35 × ATR |
+| Reclaim | signal candle must close back beyond the 21 EMA, same direction as the trend |
 | Liquidity floor | same as breakout |
 | 24h volume floor | same as breakout |
 
 ### Scenario A — the intended win: low-risk trend continuation entry
 
 SOL/USD has trended up for 3+ hours — 50 EMA rising at 0.4 ATR/candle (well
-above the 0.05 minimum), 20 EMA sitting 2.1 ATR above the 50 EMA (clearly
+above the 0.05 minimum), 21 EMA sitting 2.1 ATR above the 50 EMA (clearly
 separated, not flat). Price pulls back for 2–3 red candles to $142.30,
-touching within 0.15 ATR of the 20 EMA ($142.10), then closes back up at
-$143.80 — above the 20 EMA, bullish body. **Alert fires: UP.** Your natural
+touching within 0.15 ATR of the 21 EMA ($142.10), then closes back up at
+$143.80 — above the 21 EMA, bullish body. **Alert fires: UP.** Your natural
 stop sits just below the pullback low; if the trend continues, this entry
 has a much better risk/reward than chasing the original breakout candle
 would have.
@@ -188,8 +188,8 @@ would have.
 The same SOL/USD uptrend continues for another 8 hours through three more
 pullback-and-bounce cycles — each one fires its own alert (once cooldown
 elapses). The fourth pullback looks identical to the first three: touches
-the 20 EMA, closes back above it. **Alert fires: UP.** But this time the
-trend is actually exhausted — that "bounce" is the last gasp before the 20
+the 21 EMA, closes back above it. **Alert fires: UP.** But this time the
+trend is actually exhausted — that "bounce" is the last gasp before the 21
 EMA gets broken and the uptrend ends. The rule has no concept of "this is
 the Nth pullback in this trend" — every pullback that meets the geometry
 looks the same to it, whether it's early or late in the trend's life.
@@ -197,9 +197,9 @@ looks the same to it, whether it's early or late in the trend's life.
 ### Scenario C — correctly does *not* fire: market is flat, not trending
 
 A pair chops in a $2 range for hours. The 50 EMA slope is only 0.02 ATR/candle
-(below the 0.05 minimum) and the 20/50 EMA separation is 0.10 ATR (below the
+(below the 0.05 minimum) and the 21/50 EMA separation is 0.10 ATR (below the
 0.25 minimum) — the EMAs are tangled together, not trending. Price touches
-the 20 EMA repeatedly as it oscillates. **No alert on any of these
+the 21 EMA repeatedly as it oscillates. **No alert on any of these
 touches** — exactly the scenario this filter exists to reject, since a
 "pullback" only means something in a market that's actually trending.
 
@@ -251,7 +251,7 @@ this analysis from firing on random 5%+ chop.
 
 Real data: GWEI/USD on 2026-07-24 14:45 UTC printed a genuine 5-candle move
 of **+5.21%**, 5-candle average volume **1.53×** the 20-candle baseline,
-price above both EMAs with the 20 EMA above the 50 EMA — every momentum/EMA
+price above both EMAs with the 21 EMA above the 50 EMA — every momentum/EMA
 condition passes. Its trailing 24h quote volume was **$192,165**. Under the
 original $500,000 floor (and the later $200,000 one) this was blocked; at
 the current **$100,000** floor it clears, and **the alert fires**. The 24h

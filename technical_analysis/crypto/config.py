@@ -107,7 +107,7 @@ PRICE_CHANGE_ALERT_PCT = 1.5
 # at first).
 # -----------------------------------------------------------------------------
 
-EMA_FAST_PERIOD = 20
+EMA_FAST_PERIOD = 21
 EMA_SLOW_PERIOD = 50
 EMA_WARMUP_CANDLES = EMA_SLOW_PERIOD * 3
 
@@ -174,5 +174,5 @@ EMA9_TREND_LOOKBACK = 6
 EMA9_MIN_SLOPE_ATR = 0.08
 
 # Tighter than EMA_PULLBACK_TOUCH_ATR since the 9 EMA hugs price more closely
-# than the 20 EMA does.
+# than the 21 EMA does.
 EMA9_PULLBACK_TOUCH_ATR = 0.30

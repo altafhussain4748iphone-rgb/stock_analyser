@@ -1081,13 +1081,13 @@ def render_ema_trend_pullback_item(hit):
     signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M %Z")
 
     headline = (
-        f"{hit['direction']} 20 EMA pullback in uptrend {hit['price_change_pct']:+.2f}%"
+        f"{hit['direction']} 21 EMA pullback in uptrend {hit['price_change_pct']:+.2f}%"
     )
     detail = (
         f"close {format_price(hit['close'])}"
-        f" · 20 EMA {format_price(hit['ema_fast'])} / 50 EMA {format_price(hit['ema_slow'])}"
+        f" · 21 EMA {format_price(hit['ema_fast'])} / 50 EMA {format_price(hit['ema_slow'])}"
         f" · trend slope {hit['trend_slope_atr']:+.2f} ATR/candle"
-        f" · touched 20 EMA at {hit['touch_distance_atr']:.2f} ATR"
+        f" · touched 21 EMA at {hit['touch_distance_atr']:.2f} ATR"
         f" · 24h volume {format_compact_volume(hit['quote_volume_24h'])}"
         f" · signal {signal_time}"
     )
@@ -1265,7 +1265,7 @@ def render_ema9_pullback_item(hit):
 # over that window running above the average volume of the last
 # MOMENTUM_VOLUME_LOOKBACK candles (which includes the signal window itself,
 # same as a simple relative-volume reading), while price is trading above
-# both the 20 and 50 EMA and the 20 EMA is above the 50 EMA (uptrend filter)?
+# both the 21 and 50 EMA and the 21 EMA is above the 50 EMA (uptrend filter)?
 # -----------------------------------------------------------------------------
 
 
@@ -1466,15 +1466,15 @@ ANALYSES = [
     },
     {
         "key": "ema_trend_pullback",
-        "section_title": "20 EMA Pullback Alerts",
+        "section_title": "21 EMA Pullback Alerts",
         "run": run_ema_trend_pullback_analysis,
         "sort_key": lambda hit: abs(hit["trend_slope_atr"]),
         "log_hit": log_ema_trend_pullback_hit,
         "render_item": render_ema_trend_pullback_item,
         "section_intro": lambda _confirm_label: (
             f"<p>50 EMA trending (slope &gt;= {EMA_MIN_SLOPE_ATR:.2f} ATR/candle, "
-            f"separation from 20 EMA &gt;= {EMA_MIN_SEPARATION_ATR:.2f} ATR) with "
-            f"price pulling back to the 20 EMA (within "
+            f"separation from 21 EMA &gt;= {EMA_MIN_SEPARATION_ATR:.2f} ATR) with "
+            f"price pulling back to the 21 EMA (within "
             f"{EMA_PULLBACK_TOUCH_ATR:.2f} ATR) and closing back in the trend "
             "direction, plus liquidity filters.</p>"
         ),
