@@ -59,3 +59,28 @@ No new image or Dockerfile is needed — every workflow shares the same image, a
 Every Cloud Run Job execution's stdout/stderr is captured in Cloud Logging automatically:
 - **Console:** Cloud Run → Jobs → `analyser-crypto` → Logs (or use the `crypto_job_logs_url` Terraform output).
 - **CLI:** `gcloud logging read 'resource.type="cloud_run_job" resource.labels.job_name="analyser-crypto"' --project=financial-analyser-502901 --limit=50 --order=desc`
+
+## Pausing / resuming a job (stop alerts temporarily)
+Each job's Cloud Scheduler trigger is named `analyser-<name>-trigger` (e.g.
+`analyser-crypto-trigger`). Pausing it stops new executions — and therefore new
+alert emails — without touching the Cloud Run Job, its image, or any Terraform
+state. This is the right tool for "stop this for a while, I'll turn it back on
+later"; it's a live toggle on the scheduler, not an infrastructure change, so a
+routine `terraform apply` won't undo it and won't re-enable it either.
+
+```bash
+# Turn off (pause):
+gcloud scheduler jobs pause analyser-crypto-trigger --project=financial-analyser-502901 --location=us-central1
+
+# Turn back on (resume):
+gcloud scheduler jobs resume analyser-crypto-trigger --project=financial-analyser-502901 --location=us-central1
+
+# Check current state (ENABLED or PAUSED):
+gcloud scheduler jobs describe analyser-crypto-trigger --project=financial-analyser-502901 --location=us-central1 --format="value(state)"
+```
+
+To run a scan immediately regardless of pause state (e.g. to test), trigger the
+Cloud Run Job directly instead of the scheduler:
+```bash
+gcloud run jobs execute analyser-crypto --project=financial-analyser-502901 --region=us-central1
+```
