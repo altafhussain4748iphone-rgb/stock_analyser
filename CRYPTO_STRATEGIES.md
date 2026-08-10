@@ -21,7 +21,7 @@ outcome.
   median trade count ≥ 5, and the signal candle itself ≥ 5 trades. Tables
   below list this as "Liquidity floor." Applies to all five analyses.
 - **Absolute 24h volume floor** (`MIN_24H_QUOTE_VOLUME`, always enforced
-  regardless of the flag above): trailing 24h quote volume ≥ **$100,000**.
+  regardless of the flag above): trailing 24h quote volume ≥ **$50,000**.
   This is a coarser "is this pair even worth alerting on" check — a sum, not
   a median, so it can't be skewed low by one quiet candle — and its value is
   printed on every alert (`24h volume $X`) so you can sanity-check liquidity
@@ -54,7 +54,7 @@ that pokes through and fades.
 | Price move (open→close) | ≥ 1.0% |
 | Volume vs 96-candle median | ≥ 2.0× **and** robust z-score ≥ 3.0 |
 | Liquidity floor | median quote volume ≥ $1,000, ≥5 trades/candle |
-| 24h volume floor | ≥ $100,000 |
+| 24h volume floor | ≥ $50,000 |
 | Cooldown | 4 candles per pair |
 
 ### Scenario A — the intended win: volume-backed breakout continues
@@ -214,18 +214,18 @@ genuine 5-candle move of **+5.21%**, 5-candle average volume **1.53×** the
 20-candle baseline, price above both EMAs with the 21 EMA above the 50 EMA —
 every momentum/EMA condition passed. Its trailing 24h quote volume was
 **$192,165**. Under the
-original $500,000 floor (and the later $200,000 one) this was blocked; at
-the current **$100,000** floor it clears, and **the alert fires**. The 24h
-floor has been lowered specifically to let real-but-thinner moves like this
-one through — the tradeoff is accepting more pairs in the "some liquidity,
-but not a lot" range.
+original $500,000 floor (and the later $200,000 and $100,000 ones) this was
+blocked; at the current **$50,000** floor it clears comfortably, and **the
+alert fires**. The 24h floor has been lowered repeatedly to let
+real-but-thinner moves like this one through — the tradeoff is accepting
+more pairs in the "some liquidity, but not a lot" range.
 
 The per-candle median liquidity filter (`REQUIRE_LIQUIDITY_FILTER`) is a
 separate, independent check from the 24h floor -- GWEI cleared it too, which
 is why lowering the 24h floor alone was enough to let this one through.
 ESP/USD's 2026-07-26 10:00am spike (+25% on the candle, $110k volume, 438
 trades on that candle alone) is the contrasting case: its trailing 24h
-volume of $128,265 was well above the $100,000 floor, but 54 of the 96
+volume of $128,265 was well above the $50,000 floor, but 54 of the 96
 trailing candles before it had zero volume and zero trades, so the trailing
 median quote volume was exactly **$0** -- failing the per-candle filter
 outright (median $0 vs the $1,000 minimum, median 0 trades vs the 5-trade
