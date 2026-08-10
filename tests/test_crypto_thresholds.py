@@ -212,6 +212,14 @@ def test_requested_candle_count_fits_within_kraken_ohlc_limit():
     """Kraken's OHLC endpoint returns at most 720 closed candles (plus the
     forming one) per pair no matter what we ask for. An analysis needing more
     warmed-up history than that would silently never fire, so this guards the
-    total budget rather than any one analysis."""
+    total budget rather than any one analysis.
+
+    Checked against ALL_ANALYSES, not the enabled subset: an over-budget
+    analysis is still a bug when it is toggled off in ENABLED_ANALYSES, and
+    the check would otherwise pass for the wrong reason."""
     for confirm in (False, True):
+        needed = max(
+            spec["closed_candles_needed"](confirm) for spec in ca.ALL_ANALYSES
+        )
+        assert needed + 1 <= 721
         assert ca._max_requested_candle_count(confirm) <= 721

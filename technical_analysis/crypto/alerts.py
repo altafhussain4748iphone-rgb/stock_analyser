@@ -24,6 +24,7 @@ from technical_analysis.crypto.config import (
     CONFIRM_RETEST_TOLERANCE_ATR,
     COOLDOWN_CANDLES,
     DEFAULT_REQUIRE_NEXT_CANDLE_CONFIRMATION,
+    ENABLED_ANALYSES,
     EMA9_FAST_PERIOD,
     EMA9_MIN_SEPARATION_ATR,
     EMA9_MIN_SLOPE_ATR,
@@ -1480,8 +1481,9 @@ def render_momentum_surge_item(hit):
 #      to the history/signal candle it needs and calls the evaluator.
 #   3. Write `log_*_hit(hit, label)` and `render_*_item(hit)` for logging and
 #      the email section.
-#   4. Append a new entry below. No other code needs to change: the scanner
-#      loop, cooldown state, and combined email all iterate this list.
+#   4. Append a new entry below, and add its key to ENABLED_ANALYSES in
+#      config.py. No other code needs to change: the scanner loop, cooldown
+#      state, and combined email all iterate this list.
 #
 # Two optional hooks are available for analyses whose notion of "duplicate"
 # is more than "same pair within COOLDOWN_CANDLES":
@@ -1490,13 +1492,21 @@ def render_momentum_surge_item(hit):
 #   - "on_alert(state, hit)": called once per hit that survives every check
 #     and makes it into the sent email, for recording whatever extra state
 #     is_duplicate needs to check next time.
+#
+# "closed_candles_needed(require_next_candle_confirmation)" reports how much
+# history the analysis needs, so the shared per-pair fetch is sized to the
+# *enabled* analyses only.
+#
+# ALL_ANALYSES is the full registry; ANALYSES below is the enabled subset that
+# every other part of the scanner iterates.
 # -----------------------------------------------------------------------------
 
-ANALYSES = [
+ALL_ANALYSES = [
     {
         "key": "breakout",
         "section_title": "Confirmed Breakouts",
         "run": run_breakout_analysis,
+        "closed_candles_needed": _breakout_closed_candles_needed,
         "sort_key": lambda hit: (hit["volume_robust_z"], hit["breakout_strength_atr"]),
         "log_hit": log_breakout_hit,
         "render_item": render_breakout_item,
@@ -1510,6 +1520,7 @@ ANALYSES = [
         "key": "ema_trend_pullback",
         "section_title": "21 EMA Pullback Alerts",
         "run": run_ema_trend_pullback_analysis,
+        "closed_candles_needed": lambda _confirm: _ema_closed_candles_needed(),
         "sort_key": lambda hit: abs(hit["trend_slope_atr"]),
         "log_hit": log_ema_trend_pullback_hit,
         "render_item": render_ema_trend_pullback_item,
@@ -1526,6 +1537,7 @@ ANALYSES = [
         "key": "momentum_surge",
         "section_title": "Momentum Surge Alerts",
         "run": run_momentum_surge_analysis,
+        "closed_candles_needed": lambda _confirm: _momentum_surge_closed_candles_needed(),
         "sort_key": lambda hit: hit["price_change_pct"],
         "log_hit": log_momentum_surge_hit,
         "render_item": render_momentum_surge_item,
@@ -1540,6 +1552,7 @@ ANALYSES = [
         "key": "ema9_pullback",
         "section_title": "9 EMA Pullback Alerts",
         "run": run_ema9_pullback_analysis,
+        "closed_candles_needed": lambda _confirm: _ema9_closed_candles_needed(),
         "sort_key": lambda hit: abs(hit["trend_slope_atr"]),
         "log_hit": log_ema9_pullback_hit,
         "render_item": render_ema9_pullback_item,
@@ -1556,6 +1569,7 @@ ANALYSES = [
         "key": "ema50_pullback",
         "section_title": "50 EMA Pullback Alerts",
         "run": run_ema50_pullback_analysis,
+        "closed_candles_needed": lambda _confirm: _ema50_closed_candles_needed(),
         "sort_key": lambda hit: abs(hit["trend_slope_atr"]),
         "log_hit": log_ema50_pullback_hit,
         "render_item": render_ema50_pullback_item,
@@ -1571,13 +1585,37 @@ ANALYSES = [
 ]
 
 
+def _enabled_analyses():
+    """Filter ALL_ANALYSES down to the analyses enabled in config.
+
+    Unknown keys in ENABLED_ANALYSES are an error rather than a no-op: a typo
+    there would otherwise silently leave a strategy disabled, which looks
+    exactly like a quiet market.
+    """
+    known_keys = {spec["key"] for spec in ALL_ANALYSES}
+    unknown_keys = sorted(set(ENABLED_ANALYSES) - known_keys)
+    if unknown_keys:
+        raise ValueError(
+            f"ENABLED_ANALYSES contains unknown analysis key(s): "
+            f"{', '.join(unknown_keys)}. Known keys: {', '.join(sorted(known_keys))}."
+        )
+
+    return [spec for spec in ALL_ANALYSES if ENABLED_ANALYSES.get(spec["key"], False)]
+
+
+ANALYSES = _enabled_analyses()
+
+
 def _max_requested_candle_count(require_next_candle_confirmation):
+    # Sized to the enabled analyses only -- disabling the slow ones shrinks
+    # every per-pair fetch. Zero enabled analyses means nothing to scan; the
+    # fallback just keeps the fetch valid rather than raising on max([]).
     closed_needed = max(
-        _breakout_closed_candles_needed(require_next_candle_confirmation),
-        _ema_closed_candles_needed(),
-        _momentum_surge_closed_candles_needed(),
-        _ema9_closed_candles_needed(),
-        _ema50_closed_candles_needed(),
+        (
+            spec["closed_candles_needed"](require_next_candle_confirmation)
+            for spec in ANALYSES
+        ),
+        default=1,
     )
     # +1 for Kraken's currently forming candle, which is never evaluated.
     return closed_needed + 1
@@ -1603,7 +1641,11 @@ def build_combined_email(hits_by_analysis, interval_minutes, require_next_candle
         f'<p style="color:#555;margin-top:0;"><strong>Interval:</strong> {html.escape(label)}</p>',
     ]
 
-    for spec in ANALYSES:
+    # ALL_ANALYSES, not ANALYSES: rendering is a pure function of the hits it
+    # is handed. A scan only ever produces hits for enabled analyses, so
+    # filtering here would change nothing except to silently drop a section if
+    # a caller passes hits for a disabled one.
+    for spec in ALL_ANALYSES:
         hits = hits_by_analysis.get(spec["key"]) or []
         if not hits:
             continue
@@ -1686,6 +1728,12 @@ def scan_once(interval_minutes, require_next_candle_confirmation=False):
         mode,
         [spec["key"] for spec in ANALYSES],
     )
+
+    if not ANALYSES:
+        log.warning(
+            "Every analysis is disabled in ENABLED_ANALYSES -- nothing to scan."
+        )
+        return {}
 
     state = load_state()
     for spec in ANALYSES:

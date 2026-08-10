@@ -25,6 +25,35 @@ API_ERROR_ALERT_THRESHOLD = 5
 
 
 # -----------------------------------------------------------------------------
+# Strategy toggles
+#
+# Master on/off switch per analysis. A disabled analysis is not registered at
+# all: it never evaluates a candle, never contributes an email section, and
+# its candle requirement is excluded from the per-pair Kraken fetch size, so
+# disabling the slow ones (ema50_pullback needs 600 closed candles) makes each
+# scan cheaper as well as quieter. Cooldown state for a disabled analysis is
+# left untouched in the state file, so re-enabling it resumes where it left
+# off rather than re-alerting on pairs it already covered.
+#
+# Every key here must match an analysis key in the ALL_ANALYSES registry in
+# alerts.py -- a typo or a stale key raises at import rather than silently
+# leaving a strategy off.
+#
+# Currently on: momentum_surge (the coarsest and fastest-firing of the five)
+# and ema9_pullback, which is the only analysis fast enough to catch the first
+# dip after a momentum_surge impulse. The other three are opt-in.
+# -----------------------------------------------------------------------------
+
+ENABLED_ANALYSES = {
+    "breakout": False,
+    "ema_trend_pullback": False,
+    "momentum_surge": True,
+    "ema9_pullback": True,
+    "ema50_pullback": False,
+}
+
+
+# -----------------------------------------------------------------------------
 # Breakout settings
 #
 # These are intentionally conservative starting values. Backtest them on the
