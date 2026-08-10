@@ -34,16 +34,17 @@ def _breakout_hit(**overrides):
     return hit
 
 
-def _volume_surge_hit(**overrides):
+def _momentum_surge_hit(**overrides):
     hit = {
         "pair": "ETH/USD",
         "pair_key": "ETHUSD",
         "direction": "UP",
-        "price_change_pct": 2.0,
+        "price_change_pct": 5.5,
         "close": 3200.0,
-        "quote_volume": 90_000.0,
+        "average_signal_volume": 120_000.0,
+        "average_baseline_volume": 90_000.0,
         "quote_volume_24h": 1_800_000.0,
-        "volume_multiple": 3.2,
+        "volume_multiple": 1.33,
         "signal_time": datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc),
         "signal_epoch": 1,
         "alert_epoch": 1,
@@ -54,25 +55,25 @@ def _volume_surge_hit(**overrides):
 
 class EmailFormattingTests(unittest.TestCase):
     def test_combined_email_includes_only_sections_with_hits(self):
-        hits_by_analysis = {"breakout": [_breakout_hit()], "volume_surge": []}
+        hits_by_analysis = {"breakout": [_breakout_hit()], "momentum_surge": []}
 
         subject, body = ca.build_combined_email(hits_by_analysis, 15, False)
 
         self.assertIn("1 confirmed breakouts", subject)
         self.assertIn("BTC/USD", body)
         self.assertIn("UP breakout", body)
-        self.assertNotIn("Volume Surge Alerts", body)
+        self.assertNotIn("Momentum Surge Alerts", body)
 
     def test_combined_email_renders_both_sections(self):
         hits_by_analysis = {
             "breakout": [_breakout_hit()],
-            "volume_surge": [_volume_surge_hit()],
+            "momentum_surge": [_momentum_surge_hit()],
         }
 
         subject, body = ca.build_combined_email(hits_by_analysis, 15, False)
 
         self.assertIn("Confirmed Breakouts", body)
-        self.assertIn("Volume Surge Alerts", body)
+        self.assertIn("Momentum Surge Alerts", body)
         self.assertIn("BTC/USD", body)
         self.assertIn("ETH/USD", body)
 
@@ -116,7 +117,7 @@ class EmailFormattingTests(unittest.TestCase):
             emailing.send_email_message("subject", "body")
 
     def test_combined_alert_send_uses_shared_smtp_config(self):
-        hits_by_analysis = {"breakout": [_breakout_hit()], "volume_surge": []}
+        hits_by_analysis = {"breakout": [_breakout_hit()], "momentum_surge": []}
 
         with mock.patch.object(emailing, "get_smtp_settings", return_value={
             "host": "smtp.example.com",

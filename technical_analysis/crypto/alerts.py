@@ -31,6 +31,13 @@ from technical_analysis.crypto.config import (
     EMA9_SLOW_PERIOD,
     EMA9_TREND_LOOKBACK,
     EMA9_WARMUP_CANDLES,
+    EMA50_FAST_PERIOD,
+    EMA50_MIN_SEPARATION_ATR,
+    EMA50_MIN_SLOPE_ATR,
+    EMA50_PULLBACK_TOUCH_ATR,
+    EMA50_SLOW_PERIOD,
+    EMA50_TREND_LOOKBACK,
+    EMA50_WARMUP_CANDLES,
     EMA_FAST_PERIOD,
     EMA_MIN_SEPARATION_ATR,
     EMA_MIN_SLOPE_ATR,
@@ -51,7 +58,6 @@ from technical_analysis.crypto.config import (
     MOMENTUM_CANDLE_COUNT,
     MOMENTUM_PRICE_CHANGE_PCT,
     MOMENTUM_VOLUME_LOOKBACK,
-    PRICE_CHANGE_ALERT_PCT,
     QUOTE_FILTER,
     REQUEST_DELAY_SEC,
     REQUEST_RETRIES,
@@ -61,7 +67,6 @@ from technical_analysis.crypto.config import (
     SKIP_BASE_CURRENCIES,
     VALID_INTERVALS,
     VOLUME_LOOKBACK,
-    VOLUME_SPIKE_MULTIPLE,
 )
 
 
@@ -773,141 +778,6 @@ def render_breakout_item(hit):
 
 
 # -----------------------------------------------------------------------------
-# Volume-spike evaluation
-# -----------------------------------------------------------------------------
-
-
-def evaluate_volume_price_candle(pair, wsname, history, signal_candle):
-    if len(history) < VOLUME_LOOKBACK:
-        return None
-
-    if signal_candle["open"] <= 0:
-        return None
-
-    volume_window = history[-VOLUME_LOOKBACK:]
-    historical_quote_volumes = [
-        candle["volume"] * candle["vwap"] for candle in volume_window
-    ]
-    current_quote_volume = signal_candle["volume"] * signal_candle["vwap"]
-    median_quote_volume = median(historical_quote_volumes)
-    quote_volume_24h = sum(historical_quote_volumes) + current_quote_volume
-
-    if median_quote_volume <= 0:
-        return None
-
-    volume_multiple = current_quote_volume / median_quote_volume
-
-    historical_trade_counts = [candle["count"] for candle in volume_window]
-    median_trade_count = median(historical_trade_counts)
-
-    price_change_pct = (
-        (signal_candle["close"] - signal_candle["open"])
-        / signal_candle["open"]
-        * 100.0
-    )
-
-    passes_volume = volume_multiple >= VOLUME_SPIKE_MULTIPLE
-    passes_price = price_change_pct >= PRICE_CHANGE_ALERT_PCT
-    passes_liquidity = (not REQUIRE_LIQUIDITY_FILTER) or (
-        median_quote_volume >= MIN_MEDIAN_QUOTE_VOLUME
-        and median_trade_count >= MIN_MEDIAN_TRADE_COUNT
-        and signal_candle["count"] >= MIN_SIGNAL_TRADE_COUNT
-    )
-    passes_volume_24h = quote_volume_24h >= MIN_24H_QUOTE_VOLUME
-
-    log.debug(
-        "%s: price=%+.2f%% volume=%.2fx median_quote_volume=%.2f "
-        "median_trades=%.1f signal_trades=%d quote_volume_24h=%.2f "
-        "filters(volume=%s price=%s liquidity=%s volume_24h=%s)",
-        wsname or pair,
-        price_change_pct,
-        volume_multiple,
-        median_quote_volume,
-        median_trade_count,
-        signal_candle["count"],
-        quote_volume_24h,
-        passes_volume,
-        passes_price,
-        passes_liquidity,
-        passes_volume_24h,
-    )
-
-    if not (passes_volume and passes_price and passes_liquidity and passes_volume_24h):
-        return None
-
-    return {
-        "pair": wsname or pair,
-        "pair_key": pair,
-        "direction": "UP",
-        "open": signal_candle["open"],
-        "high": signal_candle["high"],
-        "low": signal_candle["low"],
-        "close": signal_candle["close"],
-        "price_change_pct": price_change_pct,
-        "base_volume": signal_candle["volume"],
-        "quote_volume": current_quote_volume,
-        "median_quote_volume": median_quote_volume,
-        "quote_volume_24h": quote_volume_24h,
-        "volume_multiple": volume_multiple,
-        "signal_trade_count": signal_candle["count"],
-        "median_trade_count": median_trade_count,
-        "signal_time": to_display_datetime(signal_candle["time"]),
-        "signal_epoch": signal_candle["time"],
-    }
-
-
-def _volume_surge_closed_candles_needed():
-    return VOLUME_LOOKBACK + 1
-
-
-def run_volume_surge_analysis(
-    pair,
-    wsname,
-    closed_candles,
-    interval_minutes,
-    require_next_candle_confirmation=False,
-):
-    needed = _volume_surge_closed_candles_needed()
-    if len(closed_candles) < needed:
-        return None
-
-    tail = closed_candles[-needed:]
-    history, signal_candle = tail[:-1], tail[-1]
-
-    hit = evaluate_volume_price_candle(pair, wsname, history, signal_candle)
-    if hit is None:
-        return None
-
-    hit["alert_epoch"] = signal_candle["time"]
-    return hit
-
-
-def log_volume_surge_hit(hit, label):
-    log.info(
-        "HIT[volume_surge]: %s %s volume %.1fx, price %+.2f%% (%s)",
-        hit["pair"],
-        hit["direction"],
-        hit["volume_multiple"],
-        hit["price_change_pct"],
-        label,
-    )
-
-
-def render_volume_surge_item(hit):
-    pair = html.escape(str(hit["pair"]))
-    signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M %Z")
-
-    headline = f"{hit['direction']} volume surge {hit['price_change_pct']:+.2f}%"
-    detail = (
-        f"close {format_price(hit['close'])}"
-        f" · volume ${hit['quote_volume']:,.0f} ({hit['volume_multiple']:.1f}x median)"
-        f" · 24h volume {format_compact_volume(hit['quote_volume_24h'])}"
-        f" · signal {signal_time}"
-    )
-    return _render_alert_card(pair, headline, detail)
-
-
-# -----------------------------------------------------------------------------
 # EMA evaluation
 #
 # evaluate_ema_trend_pullback_candle: is there an established uptrend, and
@@ -1258,6 +1128,169 @@ def render_ema9_pullback_item(hit):
 
 
 # -----------------------------------------------------------------------------
+# 50 EMA pullback evaluation
+#
+# evaluate_ema50_pullback_candle: the same question as the two pullback
+# analyses above, asked of the slowest EMA pair we track (50/200). A trend
+# that clears these filters has held for days rather than hours, so this
+# fires rarely -- but when it does, the dip is inside structural trend rather
+# than a fresh impulse.
+# -----------------------------------------------------------------------------
+
+
+def _ema50_closed_candles_needed():
+    return EMA50_SLOW_PERIOD + EMA50_WARMUP_CANDLES
+
+
+def _ema50_ready(closed_candles):
+    if len(closed_candles) < _ema50_closed_candles_needed():
+        return None
+
+    fast_series = calculate_ema_series(closed_candles, EMA50_FAST_PERIOD)
+    slow_series = calculate_ema_series(closed_candles, EMA50_SLOW_PERIOD)
+    if len(fast_series) < 2 or len(slow_series) < 2:
+        return None
+
+    atr = calculate_atr(closed_candles[:-1], ATR_PERIOD)
+    if atr is None or atr <= 0:
+        return None
+
+    return fast_series, slow_series, atr
+
+
+def evaluate_ema50_pullback_candle(pair, wsname, closed_candles):
+    ready = _ema50_ready(closed_candles)
+    if ready is None:
+        return None
+    fast_series, slow_series, atr = ready
+
+    if len(slow_series) <= EMA50_TREND_LOOKBACK:
+        return None
+
+    signal_candle = closed_candles[-1]
+    if signal_candle["open"] <= 0:
+        return None
+
+    ema_fast_now = fast_series[-1]
+    ema_slow_now = slow_series[-1]
+    ema_slow_then = slow_series[-1 - EMA50_TREND_LOOKBACK]
+
+    slope_atr = (ema_slow_now - ema_slow_then) / EMA50_TREND_LOOKBACK / atr
+    separation_atr = abs(ema_fast_now - ema_slow_now) / atr
+
+    trend_up = (
+        ema_fast_now > ema_slow_now
+        and slope_atr >= EMA50_MIN_SLOPE_ATR
+        and separation_atr >= EMA50_MIN_SEPARATION_ATR
+    )
+
+    if not trend_up:
+        return None
+
+    touch_distance_atr = abs(signal_candle["low"] - ema_fast_now) / atr
+    touched_fast_ema = touch_distance_atr <= EMA50_PULLBACK_TOUCH_ATR
+
+    reclaimed = (
+        signal_candle["close"] > ema_fast_now
+        and signal_candle["close"] > signal_candle["open"]
+    )
+
+    passes_liquidity, passes_volume_24h, quote_volume_24h = _liquidity_stats(
+        closed_candles[:-1], signal_candle
+    )
+
+    log.debug(
+        "%s: ema50_pullback trend_up=%s slope_atr=%.2f "
+        "separation_atr=%.2f touch_distance_atr=%.2f quote_volume_24h=%.2f "
+        "filters(touched=%s reclaimed=%s liquidity=%s volume_24h=%s)",
+        wsname or pair,
+        trend_up,
+        slope_atr,
+        separation_atr,
+        touch_distance_atr,
+        quote_volume_24h,
+        touched_fast_ema,
+        reclaimed,
+        passes_liquidity,
+        passes_volume_24h,
+    )
+
+    if not (touched_fast_ema and reclaimed and passes_liquidity and passes_volume_24h):
+        return None
+
+    price_change_pct = (
+        (signal_candle["close"] - signal_candle["open"])
+        / signal_candle["open"]
+        * 100.0
+    )
+
+    return {
+        "pair": wsname or pair,
+        "pair_key": pair,
+        "direction": "UP",
+        "open": signal_candle["open"],
+        "high": signal_candle["high"],
+        "low": signal_candle["low"],
+        "close": signal_candle["close"],
+        "price_change_pct": price_change_pct,
+        "ema_fast": ema_fast_now,
+        "ema_slow": ema_slow_now,
+        "ema_separation_atr": separation_atr,
+        "trend_slope_atr": slope_atr,
+        "touch_distance_atr": touch_distance_atr,
+        "quote_volume_24h": quote_volume_24h,
+        "signal_time": to_display_datetime(signal_candle["time"]),
+        "signal_epoch": signal_candle["time"],
+    }
+
+
+def run_ema50_pullback_analysis(
+    pair,
+    wsname,
+    closed_candles,
+    interval_minutes,
+    require_next_candle_confirmation=False,
+):
+    hit = evaluate_ema50_pullback_candle(pair, wsname, closed_candles)
+    if hit is None:
+        return None
+
+    hit["alert_epoch"] = hit["signal_epoch"]
+    return hit
+
+
+def log_ema50_pullback_hit(hit, label):
+    log.info(
+        "HIT[ema50_pullback]: %s %s pullback, slope %+.2f ATR/candle, "
+        "touch %.2f ATR, price %+.2f%% (%s)",
+        hit["pair"],
+        hit["direction"],
+        hit["trend_slope_atr"],
+        hit["touch_distance_atr"],
+        hit["price_change_pct"],
+        label,
+    )
+
+
+def render_ema50_pullback_item(hit):
+    pair = html.escape(str(hit["pair"]))
+    signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M %Z")
+
+    headline = (
+        f"{hit['direction']} 50 EMA pullback in uptrend {hit['price_change_pct']:+.2f}%"
+    )
+    detail = (
+        f"close {format_price(hit['close'])}"
+        f" · 50 EMA {format_price(hit['ema_fast'])} / 200 EMA {format_price(hit['ema_slow'])}"
+        f" · trend slope {hit['trend_slope_atr']:+.2f} ATR/candle"
+        f" · touched 50 EMA at {hit['touch_distance_atr']:.2f} ATR"
+        f" · 24h volume {format_compact_volume(hit['quote_volume_24h'])}"
+        f" · signal {signal_time}"
+    )
+    return _render_alert_card(pair, headline, detail)
+
+
+# -----------------------------------------------------------------------------
 # Momentum-surge evaluation
 #
 # evaluate_momentum_surge_candles: has price moved MOMENTUM_PRICE_CHANGE_PCT
@@ -1452,19 +1485,6 @@ ANALYSES = [
         ),
     },
     {
-        "key": "volume_surge",
-        "section_title": "Volume Surge Alerts",
-        "run": run_volume_surge_analysis,
-        "sort_key": lambda hit: hit["volume_multiple"],
-        "log_hit": log_volume_surge_hit,
-        "render_item": render_volume_surge_item,
-        "section_intro": lambda _confirm_label: (
-            f"<p>Signals passed volume &gt;= {VOLUME_SPIKE_MULTIPLE:.1f}x median and "
-            f"price move &gt;= {PRICE_CHANGE_ALERT_PCT:.1f}% on the closed candle, "
-            "plus liquidity filters.</p>"
-        ),
-    },
-    {
         "key": "ema_trend_pullback",
         "section_title": "21 EMA Pullback Alerts",
         "run": run_ema_trend_pullback_analysis,
@@ -1508,16 +1528,31 @@ ANALYSES = [
             "direction, plus liquidity filters.</p>"
         ),
     },
+    {
+        "key": "ema50_pullback",
+        "section_title": "50 EMA Pullback Alerts",
+        "run": run_ema50_pullback_analysis,
+        "sort_key": lambda hit: abs(hit["trend_slope_atr"]),
+        "log_hit": log_ema50_pullback_hit,
+        "render_item": render_ema50_pullback_item,
+        "section_intro": lambda _confirm_label: (
+            f"<p>200 EMA trending (slope &gt;= {EMA50_MIN_SLOPE_ATR:.2f} ATR/candle, "
+            f"separation from 50 EMA &gt;= {EMA50_MIN_SEPARATION_ATR:.2f} ATR) with "
+            f"price pulling back to the 50 EMA (within "
+            f"{EMA50_PULLBACK_TOUCH_ATR:.2f} ATR) and closing back in the trend "
+            "direction, plus liquidity filters.</p>"
+        ),
+    },
 ]
 
 
 def _max_requested_candle_count(require_next_candle_confirmation):
     closed_needed = max(
         _breakout_closed_candles_needed(require_next_candle_confirmation),
-        _volume_surge_closed_candles_needed(),
         _ema_closed_candles_needed(),
         _momentum_surge_closed_candles_needed(),
         _ema9_closed_candles_needed(),
+        _ema50_closed_candles_needed(),
     )
     # +1 for Kraken's currently forming candle, which is never evaluated.
     return closed_needed + 1

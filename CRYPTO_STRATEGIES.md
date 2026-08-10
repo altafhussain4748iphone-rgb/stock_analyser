@@ -26,15 +26,15 @@ outcome.
   a median, so it can't be skewed low by one quiet candle — and its value is
   printed on every alert (`24h volume $X`) so you can sanity-check liquidity
   without cross-referencing anything.
-- **`breakout` and `volume_surge` have one more, non-optional guard** on top
-  of both filters above: both divide the signal candle's volume by the
-  trailing 96-candle *median* volume to compute a volume multiple. If that
-  median is exactly **$0** (more than half the trailing candles had zero
-  trades — a dead pair), the division is skipped and the function returns no
-  hit, regardless of `REQUIRE_LIQUIDITY_FILTER`. This is a structural guard
-  against dividing by zero, not the configurable liquidity filter — so even
-  if you turn `REQUIRE_LIQUIDITY_FILTER` off, these two analyses still won't
-  alert on a pair whose trailing volume is entirely zero.
+- **`breakout` has one more, non-optional guard** on top of both filters
+  above: it divides the signal candle's volume by the trailing 96-candle
+  *median* volume to compute a volume multiple. If that median is exactly
+  **$0** (more than half the trailing candles had zero trades — a dead
+  pair), the division is skipped and the function returns no hit, regardless
+  of `REQUIRE_LIQUIDITY_FILTER`. This is a structural guard against dividing
+  by zero, not the configurable liquidity filter — so even if you turn
+  `REQUIRE_LIQUIDITY_FILTER` off, `breakout` still won't alert on a pair
+  whose trailing volume is entirely zero.
 
 ---
 
@@ -115,49 +115,7 @@ fire.)
 
 ---
 
-## 2. Volume Surge (`volume_surge`)
-
-**What it checks:** no candle-quality or ATR filters at all — just
-"something unusual just happened." Simpler and looser than breakout by
-design.
-
-| Filter | Threshold |
-|---|---|
-| Volume vs 96-candle median | ≥ 3.0× |
-| Absolute price move on the candle | ≥ 1.5% |
-| Liquidity floor | same as breakout |
-| 24h volume floor | same as breakout |
-| Cooldown | 4 candles per pair |
-
-### Scenario A — the intended catch: news/whale activity
-
-ETH/USD normally does ~$40M quote volume per 15-minute candle. A candle does
-$135M (3.4× median) with price +2.1% — maybe ETF news, maybe a large
-liquidation cascade of shorts. **Alert fires: UP.** You find out within 15
-minutes of the move starting, which is faster than most retail traders will
-notice.
-
-### Scenario B — the failure mode: it can't tell continuation from exhaustion
-
-XRP/USD has already rallied 15% over 6 hours on a real narrative. One candle
-spikes to 4× median volume with a further +2.3% move. **Alert fires: UP.**
-This could be the mid-trend continuation everyone's chasing — or it could be
-the parabolic blow-off top right before it reverses. The rule has no way to
-distinguish "more people are joining a healthy trend" from "this is the
-exhaustion spike." That's why this analysis is a "go look at this now"
-signal, not something to auto-trade blindly.
-
-### Scenario C — correctly does *not* fire: a down move
-
-DOGE/USD drops sharply on negative news: volume 5× median, price -3.4% on
-the candle. **No alert.** The analysis only checks `price_change_pct >=
-1.5` (not `abs(price_change_pct)`), so a violent selloff with volume behind
-it is filtered out the same way any other DOWN move is — only pumps are
-surfaced.
-
----
-
-## 3. EMA Trend Pullback (`ema_trend_pullback`)
+## 2. EMA Trend Pullback (`ema_trend_pullback`)
 
 **What it checks:** "buy the dip in an established uptrend" — enter on a
 pullback to the fast EMA within a confirmed uptrend, rather than chasing an
@@ -205,30 +163,30 @@ touches** — exactly the scenario this filter exists to reject, since a
 
 ---
 
-## 4. Momentum Surge (`momentum_surge`)
+## 3. Momentum Surge (`momentum_surge`)
 
-**What it checks:** the coarsest, fastest-firing analysis of the four — no
+**What it checks:** the coarsest, fastest-firing analysis of the five — no
 candle-quality or ATR filters at all. Has price already moved a meaningful
 amount over the last few candles, with volume over that window running above
 a longer baseline?
 
 | Filter | Threshold |
 |---|---|
-| Price move over last 5 candles | ≥ 5.0% (open of the 5-candle window to close of the last) |
-| Average volume over those 5 candles | > average volume over the last 20 candles |
+| Price move over last 3 candles | ≥ 5.0% (open of the 3-candle window to close of the last) |
+| Average volume over those 3 candles | > average volume over the last 20 candles |
 | Liquidity floor | same as breakout |
 | 24h volume floor | same as breakout |
 | Cooldown | 4 candles per pair |
 
-Note the 20-candle baseline *includes* the 5 signal candles — it isn't a
+Note the 20-candle baseline *includes* the 3 signal candles — it isn't a
 separate "prior" window. That makes the volume check closer to "volume
 hasn't dropped off during the move" than "volume is unusually high," which
 is a much weaker bar than the 2–3x multiples the other analyses require.
 
 ### Scenario A — the intended catch: a move already underway, confirmed by volume
 
-ADA/USD grinds from $0.4200 to $0.4430 over 5 candles (+5.5%), and the
-5-candle average quote volume is running above the 20-candle average — the
+ADA/USD grinds from $0.4200 to $0.4430 over 3 candles (+5.5%), and the
+3-candle average quote volume is running above the 20-candle average — the
 move isn't happening on fading interest. **Alert fires: UP.** Useful as a
 "this is already moving, decide if you want in" signal, not an early entry.
 
@@ -236,23 +194,26 @@ move isn't happening on fading interest. **Alert fires: UP.** Useful as a
 
 The same ADA/USD move continues for another 10 candles before reversing.
 Because the trigger requires the move to have *already happened* over a
-5-candle window, by construction the alert can only fire after most of the
+3-candle window, by construction the alert can only fire after most of the
 gain is behind it — there's no mechanism here (unlike `ema_trend_pullback`)
 that looks for a lower-risk entry point.
 
 ### Scenario C — correctly does *not* fire: choppy volume during the move
 
-A pair moves +6% over 5 candles, but volume on those candles is actually
+A pair moves +6% over 3 candles, but volume on those candles is actually
 *lower* on average than the last 20 candles (the move happened on thinning
 participation). **No alert** — the volume condition is the one thing keeping
 this analysis from firing on random 5%+ chop.
 
 ### Scenario D — a real case the floor used to block, now doesn't
 
-Real data: GWEI/USD on 2026-07-24 14:45 UTC printed a genuine 5-candle move
-of **+5.21%**, 5-candle average volume **1.53×** the 20-candle baseline,
-price above both EMAs with the 21 EMA above the 50 EMA — every momentum/EMA
-condition passes. Its trailing 24h quote volume was **$192,165**. Under the
+Real data, measured back when `MOMENTUM_CANDLE_COUNT` was still 5 (the
+figures below are left as they were actually observed rather than restated
+for the current 3-candle window): GWEI/USD on 2026-07-24 14:45 UTC printed a
+genuine 5-candle move of **+5.21%**, 5-candle average volume **1.53×** the
+20-candle baseline, price above both EMAs with the 21 EMA above the 50 EMA —
+every momentum/EMA condition passed. Its trailing 24h quote volume was
+**$192,165**. Under the
 original $500,000 floor (and the later $200,000 one) this was blocked; at
 the current **$100,000** floor it clears, and **the alert fires**. The 24h
 floor has been lowered specifically to let real-but-thinner moves like this
@@ -268,23 +229,22 @@ volume of $128,265 was well above the $100,000 floor, but 54 of the 96
 trailing candles before it had zero volume and zero trades, so the trailing
 median quote volume was exactly **$0** -- failing the per-candle filter
 outright (median $0 vs the $1,000 minimum, median 0 trades vs the 5-trade
-minimum). **No alert** on any of the five analyses. `breakout` and
-`volume_surge` would in fact still reject ESP's spike even with
-`REQUIRE_LIQUIDITY_FILTER` turned off, since both separately divide the
-signal candle's volume by that same trailing median to compute a volume
-multiple, and skip the division (returning no hit) when the median is
-exactly $0 -- a structural guard against dividing by zero, not the
-configurable filter.
+minimum). **No alert** on any of the five analyses. `breakout` would in fact
+still reject ESP's spike even with `REQUIRE_LIQUIDITY_FILTER` turned off,
+since it divides the signal candle's volume by that same trailing median to
+compute a volume multiple, and skips the division (returning no hit) when
+the median is exactly $0 -- a structural guard against dividing by zero, not
+the configurable filter.
 
 ---
 
-## 5. 9 EMA Pullback (`ema9_pullback`)
+## 4. 9 EMA Pullback (`ema9_pullback`)
 
 **What it checks:** the same "buy the dip in an uptrend" idea as
 `ema_trend_pullback`, but keyed off the faster 9/21 EMA pair instead of
 20/50. A 50 EMA trend takes hours to establish, so `ema_trend_pullback` can
 miss the *first* pullback after a fresh impulse move — e.g. a
-`momentum_surge` hit, which by definition is only 5 candles (75 minutes on
+`momentum_surge` hit, which by definition is only 3 candles (45 minutes on
 15m) old — because by the time the 50 EMA trend filter confirms, that
 early, better-risk/reward dip is often already gone. This analysis exists to
 close that gap: spot the mover with `momentum_surge`, then let this fire on
@@ -330,13 +290,109 @@ trend to call this a "pullback within."
 
 ---
 
+## 5. 50 EMA Pullback (`ema50_pullback`)
+
+**What it checks:** the same "buy the dip in an uptrend" idea a third time,
+now one step *slower* than `ema_trend_pullback` — keyed off the classic
+50/200 pair. The three pullback analyses differ only in the timescale of
+trend they'll accept: `ema9_pullback` (9/21) fires inside a move that's
+minutes old, `ema_trend_pullback` (21/50) inside one that's hours old, and
+this one only inside a trend that has held for **days** — a 200 EMA on 15m
+candles is a ~50-hour average. It is by far the rarest of the three, and
+each hit is a dip within structural trend rather than a fresh impulse.
+
+| Filter | Threshold |
+|---|---|
+| Trend defined by 200 EMA slope | ≥ 0.03 × ATR per candle (over a 20-candle lookback) |
+| EMA separation (not tangled/flat) | ≥ 0.30 × ATR |
+| Pullback touch distance to 50 EMA | ≤ 0.45 × ATR |
+| Reclaim | signal candle must close back beyond the 50 EMA, same direction as the trend |
+| Liquidity floor | same as breakout |
+| 24h volume floor | same as breakout |
+
+The thresholds move in the same direction the pair does relative to 21/50:
+looser on slope (a 200 EMA advances roughly a quarter as fast per candle as
+a 50 EMA for the same trend, so the 0.05 bar would reject everything),
+wider on separation and touch distance (price ranges further from a 50 EMA
+than from a 21 EMA), and a longer lookback (the 200 EMA barely moves candle
+to candle, so a short one measures rounding noise).
+
+**How often it actually fires.** Measured over 25 Kraken pairs × 120 recent
+15m candles (2026-08-10), counting the share of candles that had already
+passed each analysis' own trend filter:
+
+| Analysis | Median low→fast EMA distance | Touch threshold | Fires on |
+|---|---|---|---|
+| `ema9_pullback` (9/21) | 1.10 ATR | ≤ 0.30 ATR | 3.9% |
+| `ema_trend_pullback` (21/50) | 1.97 ATR | ≤ 0.35 ATR | 2.6% |
+| `ema50_pullback` (50/200) | 3.43 ATR | ≤ 0.45 ATR | 0.8% |
+
+Touch distance is the binding filter in all three. Note the thresholds
+deliberately *don't* scale with the median distance — price ranges 3× further
+from a 50 EMA than from a 9 EMA, but the threshold only widens by half.
+Holding them nearly flat as the pair slows is precisely what makes each
+successive analysis more selective, and it's why this one fires roughly a
+third as often as 21/50 on top of having a much harder trend filter to
+satisfy in the first place.
+
+**A hard constraint worth knowing:** Kraken's OHLC endpoint returns at most
+720 closed candles per pair regardless of what's requested. The other EMA
+analyses warm their EMA up over 3× the slow period before trusting it; at
+3× this pair would need 200 + 600 = 800 candles, more than Kraken will ever
+return, and the analysis would silently never fire. `EMA50_WARMUP_CANDLES`
+is therefore 2× (400), for 600 candles total — the seed error left
+unconverged at 2× is ~2%, immaterial for comparisons measured in ATR.
+`test_requested_candle_count_fits_within_kraken_ohlc_limit` guards the
+budget so a future analysis can't quietly blow past the ceiling.
+
+### Scenario A — the intended win: the dip everyone waits for
+
+SOL/USD has trended up for four days. The 200 EMA is rising at 0.06
+ATR/candle (double the 0.03 minimum) and the 50 EMA sits 3.2 ATR above it —
+unambiguous structural uptrend. Price sells off for most of a day, and one
+candle wicks down to within 0.2 ATR of the 50 EMA, then closes back above it
+green. **Alert fires: UP.** This is the highest-conviction of the three
+pullback signals: the trend behind it is measured in days, so a single bad
+candle is far less likely to have invalidated it.
+
+### Scenario B — the failure mode: it's the last pullback, and it's a big one
+
+The same SOL/USD trend is four days old — which also means it's four days
+*closer to over*. Price touches the 50 EMA and bounces, firing the alert;
+two days later the 50 EMA breaks and the whole multi-day structure unwinds.
+Because this pair is slow, the trend filter will keep reading "uptrend" for
+many candles after the top is in — the 200 EMA takes a long time to roll
+over. So the same "no concept of which pullback this is" blind spot as the
+other two costs *more* here, not less: the trends are bigger, so the
+reversals are too.
+
+### Scenario C — correctly does *not* fire: a strong but young trend
+
+A token rips +40% over eight hours — `momentum_surge` and `ema9_pullback`
+both fire, and `ema_trend_pullback` fires a few hours in. This analysis
+stays silent for days: 32 candles of history don't move a 200 EMA enough to
+clear 0.03 ATR/candle of slope, and the 50 EMA hasn't separated from it yet.
+**No alert** — correctly, since "pullback in an established trend" isn't
+what's happening; that's an impulse move, and the faster pairs are the ones
+built to catch it.
+
+### Scenario D — correctly does *not* fire: newly listed pair
+
+A token listed on Kraken three days ago is trending up cleanly. On 15m
+candles, three days is only ~288 candles — short of the 600 this analysis
+needs before it will evaluate anything. **No alert**, on any pair younger
+than about six and a half days, no matter how good the setup looks. The
+other four analyses still cover it.
+
+---
+
 ## The honest caveat
 
 All five analyses encode reasonable, standard technical-trading logic, but:
 
 - **None of it executes trades.** There's no position sizing, stop-loss, or
   exit logic — these are alerts, not an automated strategy.
-- **All four do better trending, worse chopping.** Crypto spends a lot of
+- **All five do better trending, worse chopping.** Crypto spends a lot of
   time chopping.
 - **Fees and slippage aren't modeled.** A signal that "works" on the chart
   can still lose money after Kraken's taker fee and spread on a thin pair.
@@ -349,3 +405,10 @@ watchlist, and consider combining signals (e.g. only act on an
 `ema9_pullback` alert that follows a recent `momentum_surge` hit in the same
 pair, or an `ema_trend_pullback` alert that also has a recent `breakout`)
 rather than trading any one analysis in isolation.
+
+The three pullback analyses are worth reading as a set rather than
+individually — they ask the same question of three different timescales, so
+which ones fire together tells you something none of them says alone. All
+three on one pair means a dip that's a pullback by every horizon; only
+`ema9_pullback` means a young move the slower pairs haven't confirmed and
+may never.
