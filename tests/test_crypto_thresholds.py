@@ -48,6 +48,7 @@ def test_ema50_pullback_alert_is_formatted():
                 "ema_separation_atr": 2.4,
                 "trend_slope_atr": 0.09,
                 "touch_distance_atr": 0.18,
+                "body_atr": 0.42,
                 "quote_volume_24h": 2_100_000.0,
                 "signal_time": datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc),
                 "signal_epoch": 1,
@@ -105,10 +106,18 @@ def _series(count=610, drift=0.0015):
     return candles
 
 
-def _add_pullback(candles, reclaim=True):
-    """Walk price back down to the 50 EMA, then bounce off it (or fail to)."""
+def _add_pullback(candles, reclaim=True, body_atr=None, fast_period=None):
+    """Walk price back down to the fast EMA, then bounce off it (or fail to).
+
+    `fast_period` selects which analysis' fast EMA to aim the dip at (50 by
+    default, for ema50_pullback). `body_atr` pins the size of the final green
+    body in ATR, for exercising EMA_PULLBACK_MIN_BODY_ATR; the default lets
+    it fall out of the geometry.
+    """
+    fast_period = fast_period or ca.EMA50_FAST_PERIOD
+
     for _ in range(40):
-        fast = ca.calculate_ema_series(candles, ca.EMA50_FAST_PERIOD)[-1]
+        fast = ca.calculate_ema_series(candles, fast_period)[-1]
         atr = ca.calculate_atr(candles, ca.ATR_PERIOD)
         last = candles[-1]["close"]
         if last - fast <= 0.4 * atr:
@@ -117,12 +126,11 @@ def _add_pullback(candles, reclaim=True):
             _candle(len(candles), last, max(last * (1 - 0.006), fast + 0.2 * atr))
         )
 
-    fast = ca.calculate_ema_series(candles, ca.EMA50_FAST_PERIOD)[-1]
+    fast = ca.calculate_ema_series(candles, fast_period)[-1]
     atr = ca.calculate_atr(candles, ca.ATR_PERIOD)
     close = fast + 0.6 * atr if reclaim else fast - 0.6 * atr
-    candles.append(
-        _candle(len(candles), candles[-1]["close"], close, low=fast - 0.1 * atr)
-    )
+    open_price = close - body_atr * atr if body_atr is not None else candles[-1]["close"]
+    candles.append(_candle(len(candles), open_price, close, low=fast - 0.1 * atr))
     return candles
 
 
@@ -143,6 +151,45 @@ def test_ema50_pullback_fires_on_dip_to_50_ema_in_uptrend():
 
 def test_ema50_pullback_ignores_dip_that_never_reclaims():
     assert _evaluate(_add_pullback(_series(), reclaim=False)) is None
+
+
+def test_ema50_pullback_ignores_doji_reclaim():
+    """A candle can close above the EMA and still be economically nothing --
+    a +0.01% green body. EMA_PULLBACK_MIN_BODY_ATR is what rejects those."""
+    below = ca.EMA_PULLBACK_MIN_BODY_ATR / 2
+    above = ca.EMA_PULLBACK_MIN_BODY_ATR * 2
+
+    assert _evaluate(_add_pullback(_series(), body_atr=below)) is None
+
+    hit = _evaluate(_add_pullback(_series(), body_atr=above))
+    assert hit is not None
+    assert hit["body_atr"] >= ca.EMA_PULLBACK_MIN_BODY_ATR
+
+
+def test_all_three_pullback_analyses_enforce_the_body_floor():
+    """The floor is deliberately one shared constant rather than three, so
+    guard that every pullback analysis actually reads it.
+
+    Each analysis needs the dip aimed at its own fast EMA, and each is
+    asserted to fire on a healthy body first -- otherwise "returns None on a
+    doji" would pass vacuously for an analysis that never fires at all.
+    """
+    analyses = (
+        (ca.evaluate_ema_trend_pullback_candle, ca.EMA_FAST_PERIOD),
+        (ca.evaluate_ema9_pullback_candle, ca.EMA9_FAST_PERIOD),
+        (ca.evaluate_ema50_pullback_candle, ca.EMA50_FAST_PERIOD),
+    )
+
+    for evaluate, fast_period in analyses:
+        healthy = _add_pullback(
+            _series(), body_atr=ca.EMA_PULLBACK_MIN_BODY_ATR * 2, fast_period=fast_period
+        )
+        doji = _add_pullback(
+            _series(), body_atr=ca.EMA_PULLBACK_MIN_BODY_ATR / 2, fast_period=fast_period
+        )
+
+        assert evaluate("TESTUSD", "TEST/USD", healthy) is not None, evaluate.__name__
+        assert evaluate("TESTUSD", "TEST/USD", doji) is None, evaluate.__name__
 
 
 def test_ema50_pullback_ignores_extended_price_with_no_dip():

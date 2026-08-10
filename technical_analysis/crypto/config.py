@@ -113,6 +113,32 @@ EMA_MIN_SLOPE_ATR = 0.05
 EMA_PULLBACK_TOUCH_ATR = 0.35
 
 
+# Minimum green body (close - open) on the reclaim candle, in ATR. Shared by
+# all three pullback analyses: unlike the slope/separation/touch thresholds,
+# which describe EMA geometry and so differ per pair speed, this asks a
+# question about the signal candle alone -- "is this a real bullish reclaim
+# or a doji sitting on the EMA?" -- and ATR already normalises it across
+# pairs, so there is no reason for 9/21 and 50/200 to disagree.
+#
+# Without it the reclaim test was just "close > fast EMA and close > open",
+# which any green candle passes. Live hits on 2026-08-10 included CC/USD at
+# **+0.01%** and CRV/USD at +0.11% -- technically green, economically
+# nothing. Measured over 30 pairs x 120 candles, the median pullback hit had
+# a body of only 0.20 ATR, so more than half of these alerts were dojis.
+#
+# 0.15 is the conservative setting: it removes ~32% of hits, killing the
+# indefensible ones while keeping marginal-but-real movers (CAP/USD, +0.52%
+# on a genuine 29% run, has a 0.18 ATR body and survives). There is a natural
+# gap in the data between 0.25 and 0.49 ATR -- raise this to 0.30 to cut the
+# whole doji cluster at the cost of ~53% of hits.
+#
+# Note this is ATR-relative only, unlike breakout, which pairs MIN_BODY_ATR
+# with an absolute BREAKOUT_MIN_PRICE_CHANGE_PCT floor because ATR alone can
+# pass economically tiny moves on low-volatility pairs. If that gap shows up
+# here too, add a percentage floor rather than raising this.
+EMA_PULLBACK_MIN_BODY_ATR = 0.15
+
+
 # -----------------------------------------------------------------------------
 # Momentum-surge settings
 #

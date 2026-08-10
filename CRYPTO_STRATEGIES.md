@@ -36,6 +36,35 @@ outcome.
   `REQUIRE_LIQUIDITY_FILTER` off, `breakout` still won't alert on a pair
   whose trailing volume is entirely zero.
 
+### A reclaim-body floor applies to all three pullback analyses
+
+`ema_trend_pullback`, `ema9_pullback` and `ema50_pullback` all end with the
+same question: did the signal candle close back beyond the fast EMA? That
+test used to be satisfied by *any* green candle, which in practice meant a
+lot of alerts on candles that had done nothing. On 2026-08-10 the live scan
+fired CC/USD at **+0.01%** and CRV/USD at +0.11% — technically green,
+economically meaningless. Measured over 30 pairs × 120 candles, the median
+pullback hit had a body of just **0.20 ATR**, so more than half of these
+alerts were dojis sitting on an EMA.
+
+`EMA_PULLBACK_MIN_BODY_ATR` (**0.15 ATR**) now requires the reclaim candle to
+have a real body. It is deliberately **one shared constant, not three**:
+unlike the slope, separation and touch thresholds — which describe EMA
+geometry and so legitimately differ per pair speed — this asks a question
+about the signal candle alone, and ATR already normalises it across pairs.
+
+It is measured in ATR rather than as a fixed percentage because a percentage
+that's meaningful for a micro-cap is noise on a major, and vice versa. Note
+`breakout` pairs its ATR body filter with an *absolute* percentage floor
+(`BREAKOUT_MIN_PRICE_CHANGE_PCT`) precisely because ATR alone can still pass
+economically tiny moves on a low-volatility pair; if that gap shows up here,
+the fix is to add a percentage floor rather than to raise this one.
+
+At 0.15 this removes ~32% of pullback hits — the indefensible ones, while
+keeping marginal-but-real movers. There is a natural gap in the data between
+0.25 and 0.49 ATR; raising it to **0.30** cuts the entire doji cluster at
+the cost of ~53% of hits.
+
 ---
 
 ## 1. Breakout (`breakout`)
@@ -127,6 +156,7 @@ extended breakout.
 | EMA separation (not tangled/flat) | ≥ 0.25 × ATR |
 | Pullback touch distance to 21 EMA | ≤ 0.35 × ATR |
 | Reclaim | signal candle must close back beyond the 21 EMA, same direction as the trend |
+| Reclaim body | ≥ 0.15 × ATR (close − open) |
 | Liquidity floor | same as breakout |
 | 24h volume floor | same as breakout |
 
@@ -256,6 +286,7 @@ the earliest pullback worth buying.
 | EMA separation (not tangled/flat) | ≥ 0.20 × ATR |
 | Pullback touch distance to 9 EMA | ≤ 0.30 × ATR |
 | Reclaim | signal candle must close back beyond the 9 EMA, same direction as the trend |
+| Reclaim body | ≥ 0.15 × ATR (close − open) |
 | Liquidity floor | same as breakout |
 | 24h volume floor | same as breakout |
 
@@ -307,6 +338,7 @@ each hit is a dip within structural trend rather than a fresh impulse.
 | EMA separation (not tangled/flat) | ≥ 0.30 × ATR |
 | Pullback touch distance to 50 EMA | ≤ 0.45 × ATR |
 | Reclaim | signal candle must close back beyond the 50 EMA, same direction as the trend |
+| Reclaim body | ≥ 0.15 × ATR (close − open) |
 | Liquidity floor | same as breakout |
 | 24h volume floor | same as breakout |
 

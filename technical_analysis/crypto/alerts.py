@@ -41,6 +41,7 @@ from technical_analysis.crypto.config import (
     EMA_FAST_PERIOD,
     EMA_MIN_SEPARATION_ATR,
     EMA_MIN_SLOPE_ATR,
+    EMA_PULLBACK_MIN_BODY_ATR,
     EMA_PULLBACK_TOUCH_ATR,
     EMA_SLOW_PERIOD,
     EMA_TREND_LOOKBACK,
@@ -864,9 +865,12 @@ def evaluate_ema_trend_pullback_candle(pair, wsname, closed_candles):
     touch_distance_atr = abs(signal_candle["low"] - ema_fast_now) / atr
     touched_fast_ema = touch_distance_atr <= EMA_PULLBACK_TOUCH_ATR
 
+    # A positive body_atr already implies close > open, so this subsumes the
+    # plain "is it green" check it replaces.
+    body_atr = (signal_candle["close"] - signal_candle["open"]) / atr
     reclaimed = (
         signal_candle["close"] > ema_fast_now
-        and signal_candle["close"] > signal_candle["open"]
+        and body_atr >= EMA_PULLBACK_MIN_BODY_ATR
     )
 
     passes_liquidity, passes_volume_24h, quote_volume_24h = _liquidity_stats(
@@ -875,13 +879,15 @@ def evaluate_ema_trend_pullback_candle(pair, wsname, closed_candles):
 
     log.debug(
         "%s: ema_trend_pullback trend_up=%s slope_atr=%.2f "
-        "separation_atr=%.2f touch_distance_atr=%.2f quote_volume_24h=%.2f "
+        "separation_atr=%.2f touch_distance_atr=%.2f body_atr=%.2f "
+        "quote_volume_24h=%.2f "
         "filters(touched=%s reclaimed=%s liquidity=%s volume_24h=%s)",
         wsname or pair,
         trend_up,
         slope_atr,
         separation_atr,
         touch_distance_atr,
+        body_atr,
         quote_volume_24h,
         touched_fast_ema,
         reclaimed,
@@ -912,6 +918,7 @@ def evaluate_ema_trend_pullback_candle(pair, wsname, closed_candles):
         "ema_separation_atr": separation_atr,
         "trend_slope_atr": slope_atr,
         "touch_distance_atr": touch_distance_atr,
+        "body_atr": body_atr,
         "quote_volume_24h": quote_volume_24h,
         "signal_time": to_display_datetime(signal_candle["time"]),
         "signal_epoch": signal_candle["time"],
@@ -958,6 +965,7 @@ def render_ema_trend_pullback_item(hit):
         f" · 21 EMA {format_price(hit['ema_fast'])} / 50 EMA {format_price(hit['ema_slow'])}"
         f" · trend slope {hit['trend_slope_atr']:+.2f} ATR/candle"
         f" · touched 21 EMA at {hit['touch_distance_atr']:.2f} ATR"
+        f" · reclaim body {hit['body_atr']:.2f} ATR"
         f" · 24h volume {format_compact_volume(hit['quote_volume_24h'])}"
         f" · signal {signal_time}"
     )
@@ -1027,9 +1035,12 @@ def evaluate_ema9_pullback_candle(pair, wsname, closed_candles):
     touch_distance_atr = abs(signal_candle["low"] - ema_fast_now) / atr
     touched_fast_ema = touch_distance_atr <= EMA9_PULLBACK_TOUCH_ATR
 
+    # A positive body_atr already implies close > open, so this subsumes the
+    # plain "is it green" check it replaces.
+    body_atr = (signal_candle["close"] - signal_candle["open"]) / atr
     reclaimed = (
         signal_candle["close"] > ema_fast_now
-        and signal_candle["close"] > signal_candle["open"]
+        and body_atr >= EMA_PULLBACK_MIN_BODY_ATR
     )
 
     passes_liquidity, passes_volume_24h, quote_volume_24h = _liquidity_stats(
@@ -1038,13 +1049,15 @@ def evaluate_ema9_pullback_candle(pair, wsname, closed_candles):
 
     log.debug(
         "%s: ema9_pullback trend_up=%s slope_atr=%.2f "
-        "separation_atr=%.2f touch_distance_atr=%.2f quote_volume_24h=%.2f "
+        "separation_atr=%.2f touch_distance_atr=%.2f body_atr=%.2f "
+        "quote_volume_24h=%.2f "
         "filters(touched=%s reclaimed=%s liquidity=%s volume_24h=%s)",
         wsname or pair,
         trend_up,
         slope_atr,
         separation_atr,
         touch_distance_atr,
+        body_atr,
         quote_volume_24h,
         touched_fast_ema,
         reclaimed,
@@ -1075,6 +1088,7 @@ def evaluate_ema9_pullback_candle(pair, wsname, closed_candles):
         "ema_separation_atr": separation_atr,
         "trend_slope_atr": slope_atr,
         "touch_distance_atr": touch_distance_atr,
+        "body_atr": body_atr,
         "quote_volume_24h": quote_volume_24h,
         "signal_time": to_display_datetime(signal_candle["time"]),
         "signal_epoch": signal_candle["time"],
@@ -1121,6 +1135,7 @@ def render_ema9_pullback_item(hit):
         f" · 9 EMA {format_price(hit['ema_fast'])} / 21 EMA {format_price(hit['ema_slow'])}"
         f" · trend slope {hit['trend_slope_atr']:+.2f} ATR/candle"
         f" · touched 9 EMA at {hit['touch_distance_atr']:.2f} ATR"
+        f" · reclaim body {hit['body_atr']:.2f} ATR"
         f" · 24h volume {format_compact_volume(hit['quote_volume_24h'])}"
         f" · signal {signal_time}"
     )
@@ -1190,9 +1205,12 @@ def evaluate_ema50_pullback_candle(pair, wsname, closed_candles):
     touch_distance_atr = abs(signal_candle["low"] - ema_fast_now) / atr
     touched_fast_ema = touch_distance_atr <= EMA50_PULLBACK_TOUCH_ATR
 
+    # A positive body_atr already implies close > open, so this subsumes the
+    # plain "is it green" check it replaces.
+    body_atr = (signal_candle["close"] - signal_candle["open"]) / atr
     reclaimed = (
         signal_candle["close"] > ema_fast_now
-        and signal_candle["close"] > signal_candle["open"]
+        and body_atr >= EMA_PULLBACK_MIN_BODY_ATR
     )
 
     passes_liquidity, passes_volume_24h, quote_volume_24h = _liquidity_stats(
@@ -1201,13 +1219,15 @@ def evaluate_ema50_pullback_candle(pair, wsname, closed_candles):
 
     log.debug(
         "%s: ema50_pullback trend_up=%s slope_atr=%.2f "
-        "separation_atr=%.2f touch_distance_atr=%.2f quote_volume_24h=%.2f "
+        "separation_atr=%.2f touch_distance_atr=%.2f body_atr=%.2f "
+        "quote_volume_24h=%.2f "
         "filters(touched=%s reclaimed=%s liquidity=%s volume_24h=%s)",
         wsname or pair,
         trend_up,
         slope_atr,
         separation_atr,
         touch_distance_atr,
+        body_atr,
         quote_volume_24h,
         touched_fast_ema,
         reclaimed,
@@ -1238,6 +1258,7 @@ def evaluate_ema50_pullback_candle(pair, wsname, closed_candles):
         "ema_separation_atr": separation_atr,
         "trend_slope_atr": slope_atr,
         "touch_distance_atr": touch_distance_atr,
+        "body_atr": body_atr,
         "quote_volume_24h": quote_volume_24h,
         "signal_time": to_display_datetime(signal_candle["time"]),
         "signal_epoch": signal_candle["time"],
@@ -1284,6 +1305,7 @@ def render_ema50_pullback_item(hit):
         f" · 50 EMA {format_price(hit['ema_fast'])} / 200 EMA {format_price(hit['ema_slow'])}"
         f" · trend slope {hit['trend_slope_atr']:+.2f} ATR/candle"
         f" · touched 50 EMA at {hit['touch_distance_atr']:.2f} ATR"
+        f" · reclaim body {hit['body_atr']:.2f} ATR"
         f" · 24h volume {format_compact_volume(hit['quote_volume_24h'])}"
         f" · signal {signal_time}"
     )
@@ -1496,7 +1518,8 @@ ANALYSES = [
             f"separation from 21 EMA &gt;= {EMA_MIN_SEPARATION_ATR:.2f} ATR) with "
             f"price pulling back to the 21 EMA (within "
             f"{EMA_PULLBACK_TOUCH_ATR:.2f} ATR) and closing back in the trend "
-            "direction, plus liquidity filters.</p>"
+            f"direction on a body &gt;= {EMA_PULLBACK_MIN_BODY_ATR:.2f} ATR, "
+            "plus liquidity filters.</p>"
         ),
     },
     {
@@ -1525,7 +1548,8 @@ ANALYSES = [
             f"separation from 9 EMA &gt;= {EMA9_MIN_SEPARATION_ATR:.2f} ATR) with "
             f"price pulling back to the 9 EMA (within "
             f"{EMA9_PULLBACK_TOUCH_ATR:.2f} ATR) and closing back in the trend "
-            "direction, plus liquidity filters.</p>"
+            f"direction on a body &gt;= {EMA_PULLBACK_MIN_BODY_ATR:.2f} ATR, "
+            "plus liquidity filters.</p>"
         ),
     },
     {
@@ -1540,7 +1564,8 @@ ANALYSES = [
             f"separation from 50 EMA &gt;= {EMA50_MIN_SEPARATION_ATR:.2f} ATR) with "
             f"price pulling back to the 50 EMA (within "
             f"{EMA50_PULLBACK_TOUCH_ATR:.2f} ATR) and closing back in the trend "
-            "direction, plus liquidity filters.</p>"
+            f"direction on a body &gt;= {EMA_PULLBACK_MIN_BODY_ATR:.2f} ATR, "
+            "plus liquidity filters.</p>"
         ),
     },
 ]
