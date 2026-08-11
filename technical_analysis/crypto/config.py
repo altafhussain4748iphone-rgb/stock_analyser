@@ -40,15 +40,16 @@ API_ERROR_ALERT_THRESHOLD = 5
 # leaving a strategy off.
 #
 # Currently on: momentum_surge (the coarsest and fastest-firing of the five)
-# and ema9_pullback, which is the only analysis fast enough to catch the first
-# dip after a momentum_surge impulse. The other three are opt-in.
+# and nothing else. The other four are opt-in. Note that turning ema9_pullback
+# off gives up the only analysis fast enough to catch the first dip after a
+# momentum_surge impulse -- the surge alert now stands alone.
 # -----------------------------------------------------------------------------
 
 ENABLED_ANALYSES = {
     "breakout": False,
     "ema_trend_pullback": False,
     "momentum_surge": True,
-    "ema9_pullback": True,
+    "ema9_pullback": False,
     "ema50_pullback": False,
 }
 

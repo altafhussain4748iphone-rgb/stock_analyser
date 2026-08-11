@@ -17,30 +17,31 @@ outcome.
 ### Each analysis can be switched on or off
 
 `ENABLED_ANALYSES` in `technical_analysis/crypto/config.py` is the master
-on/off switch per analysis. **`momentum_surge` and `ema9_pullback` are
-enabled**; the other three are opt-in:
+on/off switch per analysis. **Only `momentum_surge` is enabled**; the other
+four are opt-in:
 
 ```python
 ENABLED_ANALYSES = {
     "breakout": False,
     "ema_trend_pullback": False,
     "momentum_surge": True,
-    "ema9_pullback": True,
+    "ema9_pullback": False,
     "ema50_pullback": False,
 }
 ```
 
-These two pair up deliberately: `momentum_surge` spots the impulse move, and
-`ema9_pullback` is the one analysis fast enough to catch the *first* dip
-after it (see §4 below).
+Note what turning `ema9_pullback` off gives up: it was the one analysis fast
+enough to catch the *first* dip after a `momentum_surge` impulse (see §4
+below), so the surge alert now stands alone rather than being followed by an
+entry-shaped pullback signal on the same pair.
 
 A disabled analysis is not registered at all — it never evaluates a candle
 and never contributes an email section. Its candle requirement is also
-excluded from the shared per-pair fetch, so this pair of analyses fetches
-**201** candles per pair rather than the 601 that `ema50_pullback` demands —
-`ema9_pullback` needs only 84 closed candles, so enabling it alongside
-`momentum_surge` (200) adds no fetch cost at all. Cooldown state for a
-disabled analysis is left untouched in the state file, so re-enabling it
+excluded from the shared per-pair fetch, so `momentum_surge` alone fetches
+**201** candles per pair rather than the 601 that `ema50_pullback` demands.
+Disabling `ema9_pullback` doesn't shrink that fetch any further — it needs
+only 84 closed candles, well under `momentum_surge`'s 200. Cooldown state for
+a disabled analysis is left untouched in the state file, so re-enabling it
 resumes where it left off rather than re-alerting on pairs it had already
 covered.
 
