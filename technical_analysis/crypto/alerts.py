@@ -740,13 +740,15 @@ def log_breakout_hit(hit, label):
     )
 
 
-def _render_alert_card(pair, headline, detail):
+def _render_alert_card(pair, headline, detail, badge=""):
+    # `badge` is pre-rendered HTML from _render_volume_badge, not caller text --
+    # every other argument here is escaped by its caller.
     return (
         '<div style="border-left:4px solid #2e7d32;background:#f6fbf6;'
         'padding:10px 14px;margin:10px 0;border-radius:4px;'
         'font-family:-apple-system,Arial,sans-serif;">'
         f'<div style="font-size:15px;font-weight:600;color:#1a1a1a;">'
-        f'{pair} <span style="color:#2e7d32;">▲ {headline}</span></div>'
+        f'{pair} <span style="color:#2e7d32;">▲ {headline}</span>{badge}</div>'
         f'<div style="font-size:12.5px;color:#5a5a5a;margin-top:4px;'
         f'line-height:1.5;">{detail}</div>'
         "</div>"
@@ -1317,11 +1319,29 @@ def render_ema50_pullback_item(hit):
 # Momentum-surge evaluation
 #
 # evaluate_momentum_surge_candles: has price moved MOMENTUM_PRICE_CHANGE_PCT
-# or more over the last MOMENTUM_CANDLE_COUNT candles, with average volume
-# over that window running above the average volume of the last
-# MOMENTUM_VOLUME_LOOKBACK candles (which includes the signal window itself,
-# same as a simple relative-volume reading), while price is trading above
-# both the 21 and 50 EMA and the 21 EMA is above the 50 EMA (uptrend filter)?
+# or more over the last MOMENTUM_CANDLE_COUNT candles? That single price test
+# is now the whole analysis.
+#
+# Nothing else can veto a hit. Volume was demoted to a report first (see
+# below), and the 21/50 EMA uptrend filter has since been removed too, so
+# there is no trend, liquidity, candle-quality or ATR condition left. Two
+# consequences follow directly and are the point of the design:
+#
+#   - Direction is no longer verified. The analysis fires on any qualifying
+#     3-candle *rise*, including a dead-cat bounce inside a downtrend, which
+#     the EMA filter used to exclude. The hit dict still reports
+#     "direction": "UP" -- that describes the 3-candle move's sign, and no
+#     longer implies the pair is in an uptrend.
+#   - The only remaining tuning knob is MOMENTUM_PRICE_CHANGE_PCT. Every
+#     other threshold this analysis touches now affects presentation only.
+#
+# Volume is reported, not enforced: neither the per-candle liquidity filter,
+# the relative-volume comparison, nor the MIN_24H_QUOTE_VOLUME floor can
+# suppress a hit. Every alert carries a LIQUID/THIN badge set by comparing
+# trailing 24h quote volume against MIN_24H_QUOTE_VOLUME, so a thin pair still
+# surfaces and you judge its tradability from the alert. The other four
+# analyses still gate on volume and trend as before -- this asymmetry is
+# specific to momentum_surge.
 # -----------------------------------------------------------------------------
 
 
@@ -1334,13 +1354,6 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
 
     if window[0]["open"] <= 0:
         return None
-
-    fast_series = calculate_ema_series(closed_candles, EMA_FAST_PERIOD)
-    slow_series = calculate_ema_series(closed_candles, EMA_SLOW_PERIOD)
-    if not fast_series or not slow_series:
-        return None
-    ema_fast_now = fast_series[-1]
-    ema_slow_now = slow_series[-1]
 
     price_change_pct = (
         (signal_candle["close"] - window[0]["open"])
@@ -1356,46 +1369,36 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
         candle["volume"] * candle["vwap"] for candle in window
     ) / len(window)
 
-    if average_baseline_volume <= 0:
-        return None
-
-    volume_multiple = average_signal_volume / average_baseline_volume
-
-    passes_price = price_change_pct >= MOMENTUM_PRICE_CHANGE_PCT
-    passes_volume = average_signal_volume > average_baseline_volume
-    passes_liquidity, passes_volume_24h, quote_volume_24h = _liquidity_stats(
-        closed_candles[:-1], signal_candle
+    # A zero baseline used to reject the pair outright. Now that volume can't
+    # veto a hit, it only means the relative-volume reading is undefined -- the
+    # alert still goes out (badged THIN, since a pair with no baseline volume
+    # cannot clear the 24h floor) and renders the multiple as "n/a".
+    volume_multiple = (
+        average_signal_volume / average_baseline_volume
+        if average_baseline_volume > 0
+        else None
     )
-    passes_ema_trend = (
-        signal_candle["close"] > ema_fast_now
-        and signal_candle["close"] > ema_slow_now
-        and ema_fast_now > ema_slow_now
+
+    # Reported, never gated. `volume_ok` drives the badge colour only.
+    _, volume_ok, quote_volume_24h = _liquidity_stats(
+        closed_candles[:-1], signal_candle
     )
 
     log.debug(
         "%s: momentum_surge price=%+.2f%% signal_volume=%.2f "
-        "baseline_volume=%.2f multiple=%.2fx quote_volume_24h=%.2f "
-        "filters(price=%s volume=%s liquidity=%s ema_trend=%s volume_24h=%s)",
+        "baseline_volume=%.2f multiple=%s quote_volume_24h=%.2f "
+        "filters(price=%s) badge(volume_ok=%s)",
         wsname or pair,
         price_change_pct,
         average_signal_volume,
         average_baseline_volume,
-        volume_multiple,
+        f"{volume_multiple:.2f}x" if volume_multiple is not None else "n/a",
         quote_volume_24h,
-        passes_price,
-        passes_volume,
-        passes_liquidity,
-        passes_ema_trend,
-        passes_volume_24h,
+        price_change_pct >= MOMENTUM_PRICE_CHANGE_PCT,
+        volume_ok,
     )
 
-    if not (
-        passes_price
-        and passes_volume
-        and passes_liquidity
-        and passes_ema_trend
-        and passes_volume_24h
-    ):
+    if price_change_pct < MOMENTUM_PRICE_CHANGE_PCT:
         return None
 
     return {
@@ -1411,13 +1414,21 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
         "average_baseline_volume": average_baseline_volume,
         "volume_multiple": volume_multiple,
         "quote_volume_24h": quote_volume_24h,
+        "volume_ok": volume_ok,
         "signal_time": to_display_datetime(signal_candle["time"]),
         "signal_epoch": signal_candle["time"],
     }
 
 
 def _momentum_surge_closed_candles_needed():
-    return max(MOMENTUM_VOLUME_LOOKBACK, _ema_closed_candles_needed())
+    # No EMA warmup any more, so the binding constraint is the 24h volume
+    # figure behind the LIQUID/THIN badge, not the price test. _liquidity_stats
+    # slices VOLUME_LOOKBACK candles off closed_candles[:-1], so it needs
+    # VOLUME_LOOKBACK + 1 to see a full window -- short it and "24h volume"
+    # silently becomes "however many hours we happened to fetch", badging
+    # liquid pairs THIN. MOMENTUM_VOLUME_LOOKBACK (20) is well under that
+    # today, but is kept in the max so raising it can't outgrow the fetch.
+    return max(MOMENTUM_VOLUME_LOOKBACK, VOLUME_LOOKBACK + 1)
 
 
 def run_momentum_surge_analysis(
@@ -1441,14 +1452,38 @@ def run_momentum_surge_analysis(
 def log_momentum_surge_hit(hit, label):
     log.info(
         "HIT[momentum_surge]: %s %s move %+.2f%% over %d candles, "
-        "volume %.1fx %d-candle average (%s)",
+        "volume %s %d-candle average, 24h volume %.0f [%s] (%s)",
         hit["pair"],
         hit["direction"],
         hit["price_change_pct"],
         MOMENTUM_CANDLE_COUNT,
-        hit["volume_multiple"],
+        f"{hit['volume_multiple']:.1f}x"
+        if hit["volume_multiple"] is not None
+        else "n/a",
         MOMENTUM_VOLUME_LOOKBACK,
+        hit["quote_volume_24h"],
+        "LIQUID" if hit["volume_ok"] else "THIN",
         label,
+    )
+
+
+def _render_volume_badge(volume_ok):
+    """Green LIQUID / red THIN badge for momentum_surge alerts.
+
+    Inline styles with explicit background *and* border: Gmail strips
+    <style> blocks, and a colour-blind-unfriendly red/green pair is why the
+    badge carries a word rather than relying on colour alone.
+    """
+    if volume_ok:
+        text, color, background, border = ("LIQUID", "#1b5e20", "#e8f5e9", "#2e7d32")
+    else:
+        text, color, background, border = ("THIN", "#b71c1c", "#fdecea", "#c62828")
+
+    return (
+        f'<span style="display:inline-block;background:{background};'
+        f"color:{color};border:1px solid {border};border-radius:3px;"
+        f'padding:1px 6px;font-size:11px;font-weight:700;'
+        f'letter-spacing:0.03em;margin-left:6px;">{text}</span>'
     )
 
 
@@ -1456,15 +1491,26 @@ def render_momentum_surge_item(hit):
     pair = html.escape(str(hit["pair"]))
     signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M %Z")
 
+    volume_multiple_text = (
+        f"{hit['volume_multiple']:.2f}x {MOMENTUM_VOLUME_LOOKBACK}-candle average"
+        if hit["volume_multiple"] is not None
+        else f"n/a (no volume in the last {MOMENTUM_VOLUME_LOOKBACK} candles)"
+    )
+    threshold_text = format_compact_volume(MIN_24H_QUOTE_VOLUME)
+    comparison = "≥" if hit["volume_ok"] else "<"
+
     headline = f"{hit['direction']} momentum {hit['price_change_pct']:+.2f}%"
     detail = (
         f"close {format_price(hit['close'])}"
         f" · {MOMENTUM_CANDLE_COUNT}-candle move"
-        f" · volume {hit['volume_multiple']:.2f}x {MOMENTUM_VOLUME_LOOKBACK}-candle average"
+        f" · volume {volume_multiple_text}"
         f" · 24h volume {format_compact_volume(hit['quote_volume_24h'])}"
+        f" ({comparison} {threshold_text} threshold)"
         f" · signal {signal_time}"
     )
-    return _render_alert_card(pair, headline, detail)
+    return _render_alert_card(
+        pair, headline, detail, badge=_render_volume_badge(hit["volume_ok"])
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -1543,9 +1589,15 @@ ALL_ANALYSES = [
         "render_item": render_momentum_surge_item,
         "section_intro": lambda _confirm_label: (
             f"<p>Signals passed a {MOMENTUM_CANDLE_COUNT}-candle price move "
-            f"&gt;= {MOMENTUM_PRICE_CHANGE_PCT:.1f}% with average volume over "
-            f"those candles above the {MOMENTUM_VOLUME_LOOKBACK}-candle "
-            "average, plus liquidity filters.</p>"
+            f"&gt;= {MOMENTUM_PRICE_CHANGE_PCT:.1f}%. <strong>That is the "
+            "only filter</strong> &mdash; no trend, volume or liquidity "
+            "condition applies, so these may be bounces inside a downtrend. "
+            "Volume is reported, not enforced: "
+            f"<span style=\"color:#1b5e20;font-weight:700;\">LIQUID</span> = "
+            f"24h volume &ge; {format_compact_volume(MIN_24H_QUOTE_VOLUME)}, "
+            f"<span style=\"color:#b71c1c;font-weight:700;\">THIN</span> = "
+            "below it, where a move this size can be one small order crossing "
+            "a wide spread.</p>"
         ),
     },
     {

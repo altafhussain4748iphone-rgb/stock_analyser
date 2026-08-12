@@ -19,6 +19,7 @@ def test_momentum_surge_alert_is_formatted():
                 "average_baseline_volume": 90_000.0,
                 "quote_volume_24h": 2_100_000.0,
                 "volume_multiple": 1.33,
+                "volume_ok": True,
                 "signal_time": datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc),
                 "signal_epoch": 1,
                 "alert_epoch": 1,
@@ -32,6 +33,152 @@ def test_momentum_surge_alert_is_formatted():
     assert "ADA/USD" in body
     assert "1.33x" in body
     assert "+5.50%" in body
+    # Both words appear in the section legend, so assert on the badge's own
+    # background colour rather than the label text.
+    assert "LIQUID" in body
+    assert "#e8f5e9" in body  # green badge rendered
+    assert "#fdecea" not in body  # red badge not rendered
+
+
+def test_momentum_surge_thin_pair_is_badged_not_dropped():
+    """A pair under MIN_24H_QUOTE_VOLUME still alerts, badged THIN."""
+    hits_by_analysis = {
+        "momentum_surge": [
+            {
+                "pair": "BOBA/USD",
+                "pair_key": "BOBAUSD",
+                "direction": "UP",
+                "price_change_pct": 5.63,
+                "close": 0.19842,
+                "average_signal_volume": 900.0,
+                "average_baseline_volume": 880.0,
+                "quote_volume_24h": 18_900.0,
+                "volume_multiple": 1.02,
+                "volume_ok": False,
+                "signal_time": datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc),
+                "signal_epoch": 1,
+                "alert_epoch": 1,
+            }
+        ],
+    }
+
+    _subject, body = build_combined_email(hits_by_analysis, 15, False)
+
+    assert "BOBA/USD" in body
+    assert "THIN" in body
+    assert "#b71c1c" in body
+
+
+def test_momentum_surge_renders_undefined_volume_multiple():
+    """A zero-baseline pair used to be rejected; it now renders as n/a."""
+    hits_by_analysis = {
+        "momentum_surge": [
+            {
+                "pair": "KEEP/USD",
+                "pair_key": "KEEPUSD",
+                "direction": "UP",
+                "price_change_pct": 5.11,
+                "close": 0.08733,
+                "average_signal_volume": 0.0,
+                "average_baseline_volume": 0.0,
+                "quote_volume_24h": 0.0,
+                "volume_multiple": None,
+                "volume_ok": False,
+                "signal_time": datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc),
+                "signal_epoch": 1,
+                "alert_epoch": 1,
+            }
+        ],
+    }
+
+    _subject, body = build_combined_email(hits_by_analysis, 15, False)
+
+    assert "n/a" in body
+    assert "THIN" in body
+
+
+def _momentum_series(signal_volume=1000.0, baseline_volume=1000.0,
+                     trade_count=50, drift=1.002, move=1.02):
+    """Synthetic candles: `drift` per candle, then 3 candles of `move`."""
+    needed = ca._momentum_surge_closed_candles_needed()
+    out = []
+    price = 100.0
+    for i in range(needed - 3):
+        price *= drift
+        out.append({
+            "time": i * 900, "open": price, "high": price * 1.001,
+            "low": price * 0.999, "close": price, "vwap": price,
+            "volume": baseline_volume / price, "count": 50,
+        })
+    for i in range(3):
+        price *= move
+        out.append({
+            "time": (needed - 3 + i) * 900, "open": price / move,
+            "high": price, "low": price / move, "close": price,
+            "vwap": price, "volume": signal_volume / price,
+            "count": trade_count,
+        })
+    return out
+
+
+def test_momentum_surge_is_not_gated_by_volume():
+    """Volume can't suppress a hit; it only sets the badge."""
+    # Volume fading during the move: once the one gate that blocked random
+    # 5%+ chop, now reported only.
+    faded = ca.evaluate_momentum_surge_candles(
+        "X", "X/USD", _momentum_series(signal_volume=300.0)
+    )
+    assert faded is not None
+    assert faded["volume_multiple"] < 1.0
+
+    # A completely dead pair still alerts, badged THIN, with no multiple.
+    dead = ca.evaluate_momentum_surge_candles(
+        "X", "X/USD", _momentum_series(signal_volume=0.0, baseline_volume=0.0,
+                                       trade_count=0)
+    )
+    assert dead is not None
+    assert dead["volume_multiple"] is None
+    assert dead["volume_ok"] is False
+
+
+def test_momentum_surge_fires_on_a_bounce_inside_a_downtrend():
+    """The 21/50 EMA filter is gone: trend direction no longer gates a hit."""
+    downtrend = _momentum_series(drift=0.997)
+
+    fast = ca.calculate_ema_series(downtrend, ca.EMA_FAST_PERIOD)
+    slow = ca.calculate_ema_series(downtrend, ca.EMA_SLOW_PERIOD)
+    # Confirm the fixture really is a downtrend by the old filter's own test,
+    # so this asserts the filter's removal rather than a weak fixture.
+    assert fast[-1] < slow[-1]
+
+    hit = ca.evaluate_momentum_surge_candles("X", "X/USD", downtrend)
+    assert hit is not None
+    assert hit["direction"] == "UP"
+    assert hit["price_change_pct"] >= ca.MOMENTUM_PRICE_CHANGE_PCT
+
+
+def test_momentum_surge_still_requires_the_price_move():
+    """The one remaining gate."""
+    assert ca.evaluate_momentum_surge_candles(
+        "X", "X/USD", _momentum_series(move=1.001)
+    ) is None
+
+
+def test_momentum_surge_fetches_a_full_24h_volume_window():
+    """The badge is only honest if the whole VOLUME_LOOKBACK window is fetched.
+
+    Without the EMA warmup, nothing else forces the fetch to be this large --
+    a short window would silently understate 24h volume and badge liquid
+    pairs THIN.
+    """
+    assert ca._momentum_surge_closed_candles_needed() >= ca.VOLUME_LOOKBACK + 1
+
+    candles = _momentum_series()
+    hit = ca.evaluate_momentum_surge_candles("X", "X/USD", candles)
+    expected = sum(
+        c["volume"] * c["vwap"] for c in candles[-(ca.VOLUME_LOOKBACK + 1):]
+    )
+    assert hit["quote_volume_24h"] == expected
 
 
 def test_ema50_pullback_alert_is_formatted():

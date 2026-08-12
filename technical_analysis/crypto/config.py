@@ -172,18 +172,36 @@ EMA_PULLBACK_MIN_BODY_ATR = 0.15
 # -----------------------------------------------------------------------------
 # Momentum-surge settings
 #
-# "momentum_surge": a coarser, faster-firing check than breakout or
-# ema_trend_pullback -- no candle-quality or ATR filters at all. Alert when
-# price has moved MOMENTUM_PRICE_CHANGE_PCT or more over the last
-# MOMENTUM_CANDLE_COUNT candles, while average volume over that same window
-# is running above the average volume of the last MOMENTUM_VOLUME_LOOKBACK
-# candles. Reuses the breakout liquidity floor so alerts stay on tradable
-# pairs.
+# "momentum_surge": now a single price test. Alert when price has moved
+# MOMENTUM_PRICE_CHANGE_PCT or more over the last MOMENTUM_CANDLE_COUNT
+# candles. Nothing else is checked -- no candle-quality or ATR filters, no
+# volume gating, and (since the EMA filter was removed) no trend condition.
+#
+# Because the 21/50 EMA check is gone, hits are no longer confirmed to be in
+# an uptrend: a bounce inside a sustained downtrend now alerts the same as a
+# genuine impulse, and "direction": "UP" describes only the sign of the
+# 3-candle move.
+#
+# Volume does not gate this analysis either. It is the one analysis exempt
+# from both the per-candle liquidity filter and MIN_24H_QUOTE_VOLUME: those
+# are still computed, but only to badge each alert LIQUID (24h volume >=
+# MIN_24H_QUOTE_VOLUME) or THIN (below it). The other four analyses still gate
+# on both filters, and on trend, normally.
+#
+# MOMENTUM_PRICE_CHANGE_PCT is therefore the *only* knob that changes how many
+# alerts arrive. Tuning MIN_24H_QUOTE_VOLUME or REQUIRE_LIQUIDITY_FILTER only
+# moves where the badge flips colour; raise MOMENTUM_PRICE_CHANGE_PCT to make
+# this analysis quieter.
 # -----------------------------------------------------------------------------
 
 MOMENTUM_CANDLE_COUNT = 3
-MOMENTUM_VOLUME_LOOKBACK = 20
 MOMENTUM_PRICE_CHANGE_PCT = 5.0
+
+# Sizes the relative-volume figure printed on each alert. It no longer decides
+# whether one fires, and it no longer sizes the Kraken fetch either -- with the
+# EMA warmup gone, VOLUME_LOOKBACK (the 24h badge window) is the larger
+# requirement, so raising this below 96 costs nothing.
+MOMENTUM_VOLUME_LOOKBACK = 20
 
 
 # -----------------------------------------------------------------------------
