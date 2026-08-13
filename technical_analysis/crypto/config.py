@@ -172,30 +172,48 @@ EMA_PULLBACK_MIN_BODY_ATR = 0.15
 # -----------------------------------------------------------------------------
 # Momentum-surge settings
 #
-# "momentum_surge": now a single price test. Alert when price has moved
-# MOMENTUM_PRICE_CHANGE_PCT or more over the last MOMENTUM_CANDLE_COUNT
-# candles. Nothing else is checked -- no candle-quality or ATR filters, no
-# volume gating, and (since the EMA filter was removed) no trend condition.
+# "momentum_surge": two tests, both on the signal window. Alert when price has
+# moved MOMENTUM_PRICE_CHANGE_PCT or more over the last MOMENTUM_CANDLE_COUNT
+# candles AND average quote volume across those same candles clears
+# MOMENTUM_MIN_AVG_SIGNAL_VOLUME. No candle-quality or ATR filters, and
+# (since the EMA filter was removed) no trend condition.
 #
-# Because the 21/50 EMA check is gone, hits are no longer confirmed to be in
-# an uptrend: a bounce inside a sustained downtrend now alerts the same as a
-# genuine impulse, and "direction": "UP" describes only the sign of the
-# 3-candle move.
+# Because the 21/50 EMA check is gone, hits are not confirmed to be in an
+# uptrend: a bounce inside a sustained downtrend alerts the same as a genuine
+# impulse, and "direction": "UP" describes only the sign of the move.
 #
-# Volume does not gate this analysis either. It is the one analysis exempt
-# from both the per-candle liquidity filter and MIN_24H_QUOTE_VOLUME: those
-# are still computed, but only to badge each alert LIQUID (24h volume >=
-# MIN_24H_QUOTE_VOLUME) or THIN (below it). The other four analyses still gate
-# on both filters, and on trend, normally.
+# The volume floor below is absolute, and deliberately different in kind from
+# the two filters this analysis is still exempt from:
 #
-# MOMENTUM_PRICE_CHANGE_PCT is therefore the *only* knob that changes how many
-# alerts arrive. Tuning MIN_24H_QUOTE_VOLUME or REQUIRE_LIQUIDITY_FILTER only
-# moves where the badge flips colour; raise MOMENTUM_PRICE_CHANGE_PCT to make
-# this analysis quieter.
+#   - the per-candle liquidity filter (medians over 96 candles) and
+#     MIN_24H_QUOTE_VOLUME are still computed but cannot suppress a hit; they
+#     only badge each alert LIQUID or THIN.
+#   - MOMENTUM_MIN_AVG_SIGNAL_VOLUME *does* suppress hits, and it measures the
+#     3 signal candles rather than a trailing window -- "was there real money
+#     in this specific move", not "is this pair usually liquid".
+#
+# So a pair can fire while badged THIN (a quiet pair that woke up: >= $5k
+# traded across the move, but under $50k over the day), and a normally busy
+# pair can be filtered out if its 5% move happened on almost no volume. Both
+# are intended.
+#
+# Two knobs now change how many alerts arrive: MOMENTUM_PRICE_CHANGE_PCT and
+# MOMENTUM_MIN_AVG_SIGNAL_VOLUME. MIN_24H_QUOTE_VOLUME and
+# REQUIRE_LIQUIDITY_FILTER still only move where the badge flips colour.
 # -----------------------------------------------------------------------------
 
 MOMENTUM_CANDLE_COUNT = 3
 MOMENTUM_PRICE_CHANGE_PCT = 5.0
+
+# Average quote volume (USD) across the MOMENTUM_CANDLE_COUNT signal candles.
+# Compared with >=, matching the other MIN_* floors in this file.
+#
+# This is the one volume check that can block a momentum_surge alert. Setting
+# it to 0 disables it and restores the "price test only" behaviour -- and is
+# the only way the "n/a" relative-volume rendering in alerts.py becomes
+# reachable again, since a window clearing a positive floor here always leaves
+# a positive baseline to divide by.
+MOMENTUM_MIN_AVG_SIGNAL_VOLUME = 5_000.0
 
 # Sizes the relative-volume figure printed on each alert. It no longer decides
 # whether one fires, and it no longer sizes the Kraken fetch either -- with the

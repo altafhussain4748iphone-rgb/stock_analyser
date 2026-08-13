@@ -97,9 +97,15 @@ def test_momentum_surge_renders_undefined_volume_multiple():
     assert "THIN" in body
 
 
-def _momentum_series(signal_volume=1000.0, baseline_volume=1000.0,
+def _momentum_series(signal_volume=50_000.0, baseline_volume=50_000.0,
                      trade_count=50, drift=1.002, move=1.02):
-    """Synthetic candles: `drift` per candle, then 3 candles of `move`."""
+    """Synthetic candles: `drift` per candle, then 3 candles of `move`.
+
+    Volumes are quote volume per candle (vwap == price, so volume * vwap is
+    exactly the figure passed in). Defaults clear
+    MOMENTUM_MIN_AVG_SIGNAL_VOLUME so tests of other conditions aren't
+    silently blocked by the volume floor.
+    """
     needed = ca._momentum_surge_closed_candles_needed()
     out = []
     price = 100.0
@@ -121,24 +127,53 @@ def _momentum_series(signal_volume=1000.0, baseline_volume=1000.0,
     return out
 
 
-def test_momentum_surge_is_not_gated_by_volume():
-    """Volume can't suppress a hit; it only sets the badge."""
-    # Volume fading during the move: once the one gate that blocked random
-    # 5%+ chop, now reported only.
+def test_momentum_surge_ignores_relative_volume():
+    """Fading volume no longer blocks a hit -- only the absolute floor does."""
     faded = ca.evaluate_momentum_surge_candles(
-        "X", "X/USD", _momentum_series(signal_volume=300.0)
+        "X", "X/USD",
+        _momentum_series(signal_volume=10_000.0, baseline_volume=200_000.0),
     )
     assert faded is not None
+    # Well under the trailing baseline, but still real money in the move.
     assert faded["volume_multiple"] < 1.0
+    assert faded["average_signal_volume"] >= ca.MOMENTUM_MIN_AVG_SIGNAL_VOLUME
 
-    # A completely dead pair still alerts, badged THIN, with no multiple.
-    dead = ca.evaluate_momentum_surge_candles(
-        "X", "X/USD", _momentum_series(signal_volume=0.0, baseline_volume=0.0,
-                                       trade_count=0)
+
+def test_momentum_surge_blocks_a_move_on_too_little_volume():
+    """The signal-window floor is the one volume check that can veto."""
+    under = ca.evaluate_momentum_surge_candles(
+        "X", "X/USD",
+        _momentum_series(signal_volume=ca.MOMENTUM_MIN_AVG_SIGNAL_VOLUME - 1),
     )
-    assert dead is not None
-    assert dead["volume_multiple"] is None
-    assert dead["volume_ok"] is False
+    assert under is None
+
+    at_floor = ca.evaluate_momentum_surge_candles(
+        "X", "X/USD",
+        _momentum_series(signal_volume=ca.MOMENTUM_MIN_AVG_SIGNAL_VOLUME),
+    )
+    assert at_floor is not None  # compared with >=
+
+    dead = ca.evaluate_momentum_surge_candles(
+        "X", "X/USD",
+        _momentum_series(signal_volume=0.0, baseline_volume=0.0, trade_count=0),
+    )
+    assert dead is None
+
+
+def test_momentum_surge_floor_is_independent_of_the_badge():
+    """A dormant pair waking up fires while still badged THIN.
+
+    The floor measures the 3 signal candles; the badge measures trailing 24h
+    volume. A pair with a near-dead day and one lively move clears the first
+    and fails the second.
+    """
+    candles = _momentum_series(signal_volume=8_000.0, baseline_volume=1.0)
+    hit = ca.evaluate_momentum_surge_candles("X", "X/USD", candles)
+
+    assert hit is not None
+    assert hit["average_signal_volume"] >= ca.MOMENTUM_MIN_AVG_SIGNAL_VOLUME
+    assert hit["quote_volume_24h"] < ca.MIN_24H_QUOTE_VOLUME
+    assert hit["volume_ok"] is False
 
 
 def test_momentum_surge_fires_on_a_bounce_inside_a_downtrend():

@@ -58,6 +58,7 @@ from technical_analysis.crypto.config import (
     MIN_VOLUME_MULTIPLE,
     MIN_VOLUME_ROBUST_Z,
     MOMENTUM_CANDLE_COUNT,
+    MOMENTUM_MIN_AVG_SIGNAL_VOLUME,
     MOMENTUM_PRICE_CHANGE_PCT,
     MOMENTUM_VOLUME_LOOKBACK,
     QUOTE_FILTER,
@@ -1318,30 +1319,28 @@ def render_ema50_pullback_item(hit):
 # -----------------------------------------------------------------------------
 # Momentum-surge evaluation
 #
-# evaluate_momentum_surge_candles: has price moved MOMENTUM_PRICE_CHANGE_PCT
-# or more over the last MOMENTUM_CANDLE_COUNT candles? That single price test
-# is now the whole analysis.
+# evaluate_momentum_surge_candles: over the last MOMENTUM_CANDLE_COUNT
+# candles, has price moved MOMENTUM_PRICE_CHANGE_PCT or more, on average quote
+# volume of at least MOMENTUM_MIN_AVG_SIGNAL_VOLUME? Those two tests are the
+# whole analysis.
 #
-# Nothing else can veto a hit. Volume was demoted to a report first (see
-# below), and the 21/50 EMA uptrend filter has since been removed too, so
-# there is no trend, liquidity, candle-quality or ATR condition left. Two
-# consequences follow directly and are the point of the design:
+# Both look only at the signal window. There is no trend, candle-quality or
+# ATR condition, and no trailing-window volume test can veto a hit:
 #
-#   - Direction is no longer verified. The analysis fires on any qualifying
+#   - Direction is not verified. The analysis fires on any qualifying
 #     3-candle *rise*, including a dead-cat bounce inside a downtrend, which
-#     the EMA filter used to exclude. The hit dict still reports
-#     "direction": "UP" -- that describes the 3-candle move's sign, and no
-#     longer implies the pair is in an uptrend.
-#   - The only remaining tuning knob is MOMENTUM_PRICE_CHANGE_PCT. Every
-#     other threshold this analysis touches now affects presentation only.
+#     the removed EMA filter used to exclude. The hit dict still reports
+#     "direction": "UP" -- that describes the move's sign, and does not imply
+#     the pair is in an uptrend.
+#   - The per-candle liquidity filter and MIN_24H_QUOTE_VOLUME are computed
+#     but only badge the alert LIQUID/THIN. The other four analyses still gate
+#     on them; this asymmetry is specific to momentum_surge.
 #
-# Volume is reported, not enforced: neither the per-candle liquidity filter,
-# the relative-volume comparison, nor the MIN_24H_QUOTE_VOLUME floor can
-# suppress a hit. Every alert carries a LIQUID/THIN badge set by comparing
-# trailing 24h quote volume against MIN_24H_QUOTE_VOLUME, so a thin pair still
-# surfaces and you judge its tradability from the alert. The other four
-# analyses still gate on volume and trend as before -- this asymmetry is
-# specific to momentum_surge.
+# The volume floor and the badge answer different questions, and disagree on
+# purpose. The floor asks "did real money move in *this* window" and can block
+# an alert; the badge asks "is this pair liquid *in general*" and cannot. A
+# dormant pair whose 5% move traded $8k fires badged THIN; a normally busy
+# pair whose 5% move traded $500 is filtered out despite being liquid daily.
 # -----------------------------------------------------------------------------
 
 
@@ -1369,17 +1368,22 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
         candle["volume"] * candle["vwap"] for candle in window
     ) / len(window)
 
-    # A zero baseline used to reject the pair outright. Now that volume can't
-    # veto a hit, it only means the relative-volume reading is undefined -- the
-    # alert still goes out (badged THIN, since a pair with no baseline volume
-    # cannot clear the 24h floor) and renders the multiple as "n/a".
+    # Unreachable while MOMENTUM_MIN_AVG_SIGNAL_VOLUME is positive: the signal
+    # candles are a subset of the baseline window, so a window clearing that
+    # floor guarantees a positive baseline. Kept for the case where the floor
+    # is set to 0, which is the supported way to turn this filter off.
     volume_multiple = (
         average_signal_volume / average_baseline_volume
         if average_baseline_volume > 0
         else None
     )
 
-    # Reported, never gated. `volume_ok` drives the badge colour only.
+    passes_price = price_change_pct >= MOMENTUM_PRICE_CHANGE_PCT
+    passes_signal_volume = average_signal_volume >= MOMENTUM_MIN_AVG_SIGNAL_VOLUME
+
+    # Computed for the badge only -- neither of these can suppress a hit. Note
+    # `volume_ok` (trailing 24h) is independent of `passes_signal_volume` (this
+    # move): a quiet pair that wakes up fires while badged THIN.
     _, volume_ok, quote_volume_24h = _liquidity_stats(
         closed_candles[:-1], signal_candle
     )
@@ -1387,18 +1391,19 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
     log.debug(
         "%s: momentum_surge price=%+.2f%% signal_volume=%.2f "
         "baseline_volume=%.2f multiple=%s quote_volume_24h=%.2f "
-        "filters(price=%s) badge(volume_ok=%s)",
+        "filters(price=%s signal_volume=%s) badge(volume_ok=%s)",
         wsname or pair,
         price_change_pct,
         average_signal_volume,
         average_baseline_volume,
         f"{volume_multiple:.2f}x" if volume_multiple is not None else "n/a",
         quote_volume_24h,
-        price_change_pct >= MOMENTUM_PRICE_CHANGE_PCT,
+        passes_price,
+        passes_signal_volume,
         volume_ok,
     )
 
-    if price_change_pct < MOMENTUM_PRICE_CHANGE_PCT:
+    if not (passes_price and passes_signal_volume):
         return None
 
     return {
@@ -1503,6 +1508,7 @@ def render_momentum_surge_item(hit):
     detail = (
         f"close {format_price(hit['close'])}"
         f" · {MOMENTUM_CANDLE_COUNT}-candle move"
+        f" · move volume {format_compact_volume(hit['average_signal_volume'])}/candle"
         f" · volume {volume_multiple_text}"
         f" · 24h volume {format_compact_volume(hit['quote_volume_24h'])}"
         f" ({comparison} {threshold_text} threshold)"
@@ -1589,15 +1595,17 @@ ALL_ANALYSES = [
         "render_item": render_momentum_surge_item,
         "section_intro": lambda _confirm_label: (
             f"<p>Signals passed a {MOMENTUM_CANDLE_COUNT}-candle price move "
-            f"&gt;= {MOMENTUM_PRICE_CHANGE_PCT:.1f}%. <strong>That is the "
-            "only filter</strong> &mdash; no trend, volume or liquidity "
-            "condition applies, so these may be bounces inside a downtrend. "
-            "Volume is reported, not enforced: "
+            f"&gt;= {MOMENTUM_PRICE_CHANGE_PCT:.1f}% on average volume of "
+            f"&ge; {format_compact_volume(MOMENTUM_MIN_AVG_SIGNAL_VOLUME)} "
+            "per candle across the move. <strong>No trend filter "
+            "applies</strong>, so these may be bounces inside a downtrend. "
+            "The badge is a separate, trailing measure that never blocks an "
+            "alert: "
             f"<span style=\"color:#1b5e20;font-weight:700;\">LIQUID</span> = "
             f"24h volume &ge; {format_compact_volume(MIN_24H_QUOTE_VOLUME)}, "
             f"<span style=\"color:#b71c1c;font-weight:700;\">THIN</span> = "
-            "below it, where a move this size can be one small order crossing "
-            "a wide spread.</p>"
+            "below it &mdash; a quiet pair that just woke up can clear the "
+            "move-volume floor while still being badged THIN.</p>"
         ),
     },
     {

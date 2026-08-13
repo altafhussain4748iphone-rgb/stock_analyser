@@ -236,13 +236,14 @@ touches** — exactly the scenario this filter exists to reject, since a
 
 ## 3. Momentum Surge (`momentum_surge`)
 
-**What it checks:** one thing. Has price moved ≥ 5.0% over the last 3
-candles? There is no other condition — no trend, volume, liquidity,
-candle-quality or ATR filter remains.
+**What it checks:** two things, both measured on the same 3 candles. Did
+price move ≥ 5.0%, and did an average of ≥ $5,000 per candle actually trade
+while it did? No trend, candle-quality or ATR filter remains.
 
 | Filter | Threshold |
 |---|---|
 | Price move over last 3 candles | ≥ 5.0% (open of the 3-candle window to close of the last) |
+| Average quote volume over those 3 candles | ≥ **$5,000** per candle (`MOMENTUM_MIN_AVG_SIGNAL_VOLUME`) |
 | Uptrend (21/50 EMA) | **removed** — not checked at all |
 | Relative volume | **not checked** — reported only |
 | Liquidity floor | **not checked** — reported only |
@@ -260,31 +261,43 @@ The `direction: UP` in each alert describes the sign of the 3-candle move and
 nothing more. Judging whether that move sits inside an uptrend is now
 entirely on you, from the chart.
 
-This also makes `MOMENTUM_PRICE_CHANGE_PCT` the sole tuning knob: every other
-threshold this analysis touches affects only what the email *says*, not how
-many alerts arrive.
+`MOMENTUM_PRICE_CHANGE_PCT` and `MOMENTUM_MIN_AVG_SIGNAL_VOLUME` are the two
+tuning knobs that change how many alerts arrive. Every other threshold this
+analysis touches affects only what the email *says*.
 
-#### Volume is reported, not enforced
+#### Two different volume questions
 
-Price and the EMA uptrend are the *only* things that can stop an alert here.
-Every hit carries a badge set by trailing 24h quote volume against
-`MIN_24H_QUOTE_VOLUME` (**$50,000**):
+Volume appears twice here, measuring different things over different windows,
+and only one of them can block an alert.
+
+| | Window | Asks | Can block? |
+|---|---|---|---|
+| **Move-volume floor** (`MOMENTUM_MIN_AVG_SIGNAL_VOLUME`, $5,000) | the 3 signal candles | did real money move *in this move*? | **yes** |
+| **LIQUID/THIN badge** (`MIN_24H_QUOTE_VOLUME`, $50,000) | trailing 24h | is this pair liquid *in general*? | no |
+
+They disagree on purpose, in both directions:
+
+- A dormant pair that wakes up — $8,000 traded across the move, but under
+  $50,000 over the day — **fires, badged THIN**. That's a real signal on a
+  pair you should size carefully.
+- A normally busy pair whose 5% move happened on $500 of trading is
+  **filtered out**, despite being liquid on any daily measure. Nothing
+  happened in that move worth alerting on.
+
+The badge itself:
 
 - <span title="green">**LIQUID**</span> (green) — 24h volume ≥ $50,000.
-- <span title="red">**THIN**</span> (red) — below it. The move is real in
-  percentage terms but may be one small order crossing a wide spread, and the
-  size you can actually trade is limited.
+- <span title="red">**THIN**</span> (red) — below it. The move cleared the
+  floor, so money did trade, but the pair is quiet enough that the size you
+  can actually get in and out with is limited.
 
 The relative-volume multiple is still printed (`volume 3.18x 20-candle
-average`) as an unfiltered reading. A pair with *no* volume at all over the
-trailing 20 candles renders it as `n/a` rather than being dropped — that case
-used to be rejected outright by a divide-by-zero guard, and now surfaces
-badged THIN.
+average`) as an unfiltered reading — useful for spotting a move that happened
+on fading participation, which nothing here blocks.
 
-**Expect more alerts, and expect some of them to be junk.** This trades
-precision for coverage: you see every qualifying price move and do the
-liquidity triage yourself from the badge. The old behaviour — volume as a
-hard gate — is what the other four analyses still do.
+**Expect more alerts than before the filter changes, but not the flood that
+removing volume entirely produced.** The $5,000 floor is what keeps genuinely
+dead pairs out; the badge is what you triage the survivors with.
 
 ### Scenario A — the intended catch: a move already underway
 
@@ -314,12 +327,13 @@ average than the last 20 (the move happened on thinning participation).
 the badge measures absolute 24h turnover and not whether volume faded during
 this particular move.
 
-This is the clearest cost of removing the volume gate. That condition was
+This is the cost of dropping the *relative* volume test. That condition was
 previously "the one thing keeping this analysis from firing on random 5%+
-chop," and it is gone. The `volume 0.8x 20-candle average` reading in the
-alert body is what now tells you this — a multiple below ~1.0x means the move
-happened on fading participation, and it is worth reading before acting even
-when the badge is green.
+chop," and it is gone — the $5,000 floor replaced it with an absolute bar,
+which a busy pair clears easily even on a fading move. The `volume 0.8x
+20-candle average` reading in the alert body is what now tells you this — a
+multiple below ~1.0x means the move happened on thinning participation, and
+it is worth reading before acting even when the badge is green.
 
 ### Scenario D — now fires: a thin pair below the 24h floor
 
@@ -330,10 +344,12 @@ exactly **$0**, far under the $1,000 per-candle minimum. Under the old rules
 that failed the liquidity filter outright and produced **no alert on any of
 the five analyses**.
 
-Now `momentum_surge` **does alert** on it. Its trailing 24h volume of
-$128,265 clears $50,000, so it would even be badged **LIQUID** despite half
-its recent candles being dead — a case where the badge and the per-candle
-liquidity picture disagree, and the badge is the less informative of the two.
+Now `momentum_surge` **does alert** on it. The $110k that traded on the spike
+candle puts the 3-candle average far above the $5,000 move-volume floor, and
+its trailing 24h volume of $128,265 clears $50,000, so it is even badged
+**LIQUID** despite half its recent candles being dead — a case where the
+badge and the per-candle liquidity picture disagree, and the badge is the
+less informative of the two.
 The other four analyses still reject it. `breakout` in particular would
 reject it even with `REQUIRE_LIQUIDITY_FILTER` off, since it divides by that
 same $0 median and skips the division as a structural divide-by-zero guard.
@@ -357,6 +373,18 @@ exclude this, and it is gone. The email will describe a genuine +5.4% move on
 a liquid pair, and every word of that will be true while the pair is still in
 free-fall. Nothing in the alert distinguishes this from Scenario A — that
 distinction now lives only on the chart.
+
+### Scenario F — correctly does *not* fire: a 5% move nobody traded
+
+A microcap prints +6.8% over 3 candles, but only ~$400 of quote volume per
+candle changed hands doing it — a handful of small orders walking a thin book
+upward. The 3-candle average is under the **$5,000** floor. **No alert.**
+
+This is the case the floor exists for, and it is the main thing standing
+between you and a very noisy inbox: on a thin enough pair, a 5% move requires
+almost no money at all. Note that the pair's *daily* volume is irrelevant
+here — a pair with $2M of 24h volume is filtered out just the same if this
+particular move traded $400 a candle.
 
 ---
 
