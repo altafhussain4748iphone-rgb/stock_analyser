@@ -1325,20 +1325,21 @@ def render_ema50_pullback_item(hit):
 #
 # evaluate_momentum_surge_candles: over the last MOMENTUM_CANDLE_COUNT
 # candles, has price moved MOMENTUM_PRICE_CHANGE_PCT or more, on average quote
-# volume of at least MOMENTUM_MIN_AVG_SIGNAL_VOLUME? Those two tests are the
-# whole analysis.
+# volume of at least MOMENTUM_MIN_AVG_SIGNAL_VOLUME, with the signal candle
+# closing above both the 21 and 50 EMA and the 21 EMA above the 50 EMA? Those
+# three tests are the whole analysis.
 #
-# Both look only at the signal window. There is no trend, candle-quality or
+# The first two look only at the signal window; the third is the uptrend
+# filter, measured on the signal candle. There is still no candle-quality or
 # ATR condition, and no trailing-window volume test can veto a hit:
 #
-#   - Direction is not verified. The analysis fires on any qualifying
-#     3-candle *rise*, including a dead-cat bounce inside a downtrend, which
-#     the removed EMA filter used to exclude. The hit dict still reports
-#     "direction": "UP" -- that describes the move's sign, and does not imply
-#     the pair is in an uptrend.
+#   - Direction is verified again. The EMA filter was removed in 5d7ae06 and
+#     restored here, so a dead-cat bounce inside a downtrend no longer fires:
+#     "direction": "UP" once more implies the pair is in a 21/50 uptrend, not
+#     merely that these three candles rose.
 #   - The per-candle liquidity filter and MIN_24H_QUOTE_VOLUME are computed
-#     but only badge the alert LIQUID/THIN. The other four analyses still gate
-#     on them; this asymmetry is specific to momentum_surge.
+#     but only badge the alert LIQUID/THIN. The other analyses still gate on
+#     them; this asymmetry is specific to the two momentum analyses.
 #
 # The volume floor and the badge answer different questions, and disagree on
 # purpose. The floor asks "did real money move in *this* window" and can block
@@ -1435,19 +1436,39 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
     if stats is None:
         return None
 
+    signal_candle = stats["signal_candle"]
     passes_price = stats["price_change_pct"] >= MOMENTUM_PRICE_CHANGE_PCT
+
+    fast_series = calculate_ema_series(closed_candles, EMA_FAST_PERIOD)
+    slow_series = calculate_ema_series(closed_candles, EMA_SLOW_PERIOD)
+    if not fast_series or not slow_series:
+        return None
+    ema_fast_now = fast_series[-1]
+    ema_slow_now = slow_series[-1]
+
+    # The uptrend filter, on the signal candle only -- unlike
+    # trend_momentum_surge, which checks its (faster) EMA pair on every candle
+    # of the window. Here the question is just "is the pair in a 21/50 uptrend
+    # at the moment this move finished", which is what keeps a dead-cat bounce
+    # inside a downtrend out of the section.
+    passes_ema_trend = (
+        signal_candle["close"] > ema_fast_now
+        and signal_candle["close"] > ema_slow_now
+        and ema_fast_now > ema_slow_now
+    )
 
     # Computed for the badge only -- neither of these can suppress a hit. Note
     # `volume_ok` (trailing 24h) is independent of `passes_signal_volume` (this
     # move): a quiet pair that wakes up fires while badged THIN.
     _, volume_ok, quote_volume_24h = _liquidity_stats(
-        closed_candles[:-1], stats["signal_candle"]
+        closed_candles[:-1], signal_candle
     )
 
     log.debug(
         "%s: momentum_surge price=%+.2f%% signal_volume=%.2f "
-        "baseline_volume=%.2f multiple=%s quote_volume_24h=%.2f "
-        "filters(price=%s signal_volume=%s) badge(volume_ok=%s)",
+        "baseline_volume=%.2f multiple=%s ema_fast=%.6f ema_slow=%.6f "
+        "quote_volume_24h=%.2f "
+        "filters(price=%s signal_volume=%s ema_trend=%s) badge(volume_ok=%s)",
         wsname or pair,
         stats["price_change_pct"],
         stats["average_signal_volume"],
@@ -1455,27 +1476,46 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
         f"{stats['volume_multiple']:.2f}x"
         if stats["volume_multiple"] is not None
         else "n/a",
+        ema_fast_now,
+        ema_slow_now,
         quote_volume_24h,
         passes_price,
         stats["passes_signal_volume"],
+        passes_ema_trend,
         volume_ok,
     )
 
-    if not (passes_price and stats["passes_signal_volume"]):
+    if not (passes_price and stats["passes_signal_volume"] and passes_ema_trend):
         return None
 
-    return _momentum_hit(pair, wsname, stats, quote_volume_24h, volume_ok)
+    hit = _momentum_hit(pair, wsname, stats, quote_volume_24h, volume_ok)
+    hit["ema_fast"] = ema_fast_now
+    hit["ema_slow"] = ema_slow_now
+    return hit
 
 
 def _momentum_surge_closed_candles_needed():
-    # No EMA warmup any more, so the binding constraint is the 24h volume
-    # figure behind the LIQUID/THIN badge, not the price test. _liquidity_stats
-    # slices VOLUME_LOOKBACK candles off closed_candles[:-1], so it needs
-    # VOLUME_LOOKBACK + 1 to see a full window -- short it and "24h volume"
-    # silently becomes "however many hours we happened to fetch", badging
-    # liquid pairs THIN. MOMENTUM_VOLUME_LOOKBACK (20) is well under that
-    # today, but is kept in the max so raising it can't outgrow the fetch.
-    return max(MOMENTUM_VOLUME_LOOKBACK, VOLUME_LOOKBACK + 1)
+    # Two independent constraints, both load-bearing:
+    #
+    #   - _ema_closed_candles_needed() (200) warms the 50 EMA behind the
+    #     uptrend filter. An EMA seeded from a plain SMA is inaccurate for its
+    #     first few periods, and here that error would show up as false
+    #     21-over-50 orderings on pairs that just came into range.
+    #   - VOLUME_LOOKBACK + 1 (97) is what the LIQUID/THIN badge needs:
+    #     _liquidity_stats slices VOLUME_LOOKBACK candles off
+    #     closed_candles[:-1], so short it and "24h volume" silently becomes
+    #     "however many hours we happened to fetch", badging liquid pairs THIN.
+    #
+    # The EMA warmup is the larger of the two today, exactly as it was before
+    # the filter was removed in 5d7ae06 -- so restoring the filter takes the
+    # per-pair fetch back from 98 to 201 candles. MOMENTUM_VOLUME_LOOKBACK (20)
+    # is well under both but is kept in the max so raising it can't outgrow the
+    # fetch.
+    return max(
+        MOMENTUM_VOLUME_LOOKBACK,
+        VOLUME_LOOKBACK + 1,
+        _ema_closed_candles_needed(),
+    )
 
 
 def run_momentum_surge_analysis(
@@ -1498,12 +1538,14 @@ def run_momentum_surge_analysis(
 
 def log_momentum_surge_hit(hit, label):
     log.info(
-        "HIT[momentum_surge]: %s %s move %+.2f%% over %d candles, "
-        "volume %s %d-candle average, 24h volume %.0f [%s] (%s)",
+        "HIT[momentum_surge]: %s %s move %+.2f%% over %d candles in a %d/%d "
+        "EMA uptrend, volume %s %d-candle average, 24h volume %.0f [%s] (%s)",
         hit["pair"],
         hit["direction"],
         hit["price_change_pct"],
         MOMENTUM_CANDLE_COUNT,
+        EMA_FAST_PERIOD,
+        EMA_SLOW_PERIOD,
         f"{hit['volume_multiple']:.1f}x"
         if hit["volume_multiple"] is not None
         else "n/a",
@@ -1550,6 +1592,8 @@ def render_momentum_surge_item(hit):
     detail = (
         f"close {format_price(hit['close'])}"
         f" · {MOMENTUM_CANDLE_COUNT}-candle move"
+        f" · {EMA_FAST_PERIOD} EMA {format_price(hit['ema_fast'])}"
+        f" / {EMA_SLOW_PERIOD} EMA {format_price(hit['ema_slow'])}"
         f" · move volume {format_compact_volume(hit['average_signal_volume'])}/candle"
         f" · volume {volume_multiple_text}"
         f" · 24h volume {format_compact_volume(hit['quote_volume_24h'])}"
@@ -1566,8 +1610,11 @@ def render_momentum_surge_item(hit):
 #
 # evaluate_trend_momentum_surge_candles: the shape of the move rather than its
 # size. Over the same MOMENTUM_CANDLE_COUNT window momentum_surge measures,
-# *every* candle must have closed above its open, with the 9 EMA above the 21
-# EMA and the close above the 21 EMA at that candle. It shares
+# *every* candle must have closed above its open AND above the previous
+# candle's close, with the 9 EMA above the 21 EMA and the close above the 21
+# EMA at that candle. The "above the previous close" test reaches one bar
+# further back than the window, so it covers the window's first candle too. It
+# shares
 # momentum_surge's volume floor but applies its own price threshold,
 # MOMENTUM_TREND_PRICE_CHANGE_PCT, which is 0 -- so this is NOT a subset of
 # momentum_surge, and most of its hits are moves far too small for the 5% bar.
@@ -1583,11 +1630,17 @@ def render_momentum_surge_item(hit):
 
 
 def _trend_momentum_surge_closed_candles_needed():
-    # Whichever is larger: momentum_surge's 24h badge window, or the 21 EMA
-    # plus its warmup. At today's settings the badge window (97) still wins,
-    # so adding this analysis does not grow the per-pair Kraken fetch.
+    # Spelled out rather than deferring to _momentum_surge_closed_candles_needed
+    # so this analysis stays cheap on its own terms: momentum_surge's 21/50 EMA
+    # warmup needs 200 candles, but nothing here does, and borrowing its number
+    # would make disabling momentum_surge fail to shrink the fetch.
+    #
+    # VOLUME_LOOKBACK + 1 (97) is what the LIQUID/THIN badge needs -- see
+    # _momentum_surge_closed_candles_needed for why one short of that quietly
+    # mislabels liquid pairs THIN -- and it beats the 21 EMA plus warmup (84).
     return max(
-        _momentum_surge_closed_candles_needed(),
+        MOMENTUM_VOLUME_LOOKBACK,
+        VOLUME_LOOKBACK + 1,
         MOMENTUM_TREND_SLOW_PERIOD + MOMENTUM_TREND_WARMUP_CANDLES,
     )
 
@@ -1619,6 +1672,20 @@ def evaluate_trend_momentum_surge_candles(pair, wsname, closed_candles):
     all_candles_up = all(
         candle["close"] > candle["open"] for candle in window
     )
+
+    # "Every candle closed above the previous one" includes the first candle of
+    # the window, so this reaches one bar further back for its comparison.
+    # Distinct from all_candles_up: a candle that gaps up and then fades closes
+    # above the previous close while still printing red, and one that opens
+    # below the previous close and recovers only part of the way is green while
+    # the sequence of closes steps down.
+    closes = [closed_candles[-MOMENTUM_CANDLE_COUNT - 1]["close"]] + [
+        candle["close"] for candle in window
+    ]
+    closes_rising = all(
+        later > earlier for earlier, later in zip(closes, closes[1:])
+    )
+
     ema_stacked = all(
         fast > slow for fast, slow in zip(fast_window, slow_window)
     )
@@ -1635,9 +1702,9 @@ def evaluate_trend_momentum_surge_candles(pair, wsname, closed_candles):
         else 0.0
     )
 
-    # Its own threshold, not momentum_surge's: at 0 this only rules out a
-    # window that closed below where it opened, which three green candles can
-    # still do when one opens below the previous candle's close.
+    # Its own threshold, not momentum_surge's. At 0 it cannot reject anything
+    # (all_candles_up and closes_rising already force a positive move); it is
+    # the knob for putting a size floor back. See the config block.
     passes_price = stats["price_change_pct"] >= MOMENTUM_TREND_PRICE_CHANGE_PCT
 
     # Badge only, as in momentum_surge -- it cannot suppress a hit.
@@ -1648,8 +1715,8 @@ def evaluate_trend_momentum_surge_candles(pair, wsname, closed_candles):
     log.debug(
         "%s: trend_momentum_surge price=%+.2f%% signal_volume=%.2f "
         "ema_fast=%.6f ema_slow=%.6f gap=%+.2f%% quote_volume_24h=%.2f "
-        "filters(price=%s signal_volume=%s candles_up=%s ema_stacked=%s "
-        "above_slow_ema=%s) badge(volume_ok=%s)",
+        "filters(price=%s signal_volume=%s candles_up=%s closes_rising=%s "
+        "ema_stacked=%s above_slow_ema=%s) badge(volume_ok=%s)",
         wsname or pair,
         stats["price_change_pct"],
         stats["average_signal_volume"],
@@ -1660,6 +1727,7 @@ def evaluate_trend_momentum_surge_candles(pair, wsname, closed_candles):
         passes_price,
         stats["passes_signal_volume"],
         all_candles_up,
+        closes_rising,
         ema_stacked,
         above_slow_ema,
         volume_ok,
@@ -1669,6 +1737,7 @@ def evaluate_trend_momentum_surge_candles(pair, wsname, closed_candles):
         passes_price
         and stats["passes_signal_volume"]
         and all_candles_up
+        and closes_rising
         and ema_stacked
         and above_slow_ema
     ):
@@ -1720,7 +1789,7 @@ def render_trend_momentum_surge_item(hit):
     headline = f"{hit['direction']} trend momentum {hit['price_change_pct']:+.2f}%"
     detail = (
         f"close {format_price(hit['close'])}"
-        f" · {MOMENTUM_CANDLE_COUNT} consecutive up candles"
+        f" · {MOMENTUM_CANDLE_COUNT} consecutive up candles, each closing higher"
         f" · {MOMENTUM_TREND_FAST_PERIOD} EMA {format_price(hit['ema_fast'])}"
         f" / {MOMENTUM_TREND_SLOW_PERIOD} EMA {format_price(hit['ema_slow'])}"
         f" ({hit['ema_gap_pct']:+.2f}%)"
@@ -1811,8 +1880,11 @@ ALL_ANALYSES = [
             f"<p>Signals passed a {MOMENTUM_CANDLE_COUNT}-candle price move "
             f"&gt;= {MOMENTUM_PRICE_CHANGE_PCT:.1f}% on average volume of "
             f"&ge; {format_compact_volume(MOMENTUM_MIN_AVG_SIGNAL_VOLUME)} "
-            "per candle across the move. <strong>No trend filter "
-            "applies</strong>, so these may be bounces inside a downtrend. "
+            "per candle across the move, <strong>with the signal candle "
+            f"closing above both the {EMA_FAST_PERIOD} and "
+            f"{EMA_SLOW_PERIOD} EMA and the {EMA_FAST_PERIOD} EMA above the "
+            f"{EMA_SLOW_PERIOD} EMA</strong> &mdash; so these are moves "
+            "inside an uptrend, not bounces inside a downtrend. "
             "The badge is a separate, trailing measure that never blocks an "
             "alert: "
             f"<span style=\"color:#1b5e20;font-weight:700;\">LIQUID</span> = "
@@ -1831,7 +1903,8 @@ ALL_ANALYSES = [
         "log_hit": log_trend_momentum_surge_hit,
         "render_item": render_trend_momentum_surge_item,
         "section_intro": lambda _confirm_label: (
-            f"<p>All {MOMENTUM_CANDLE_COUNT} candles closed above their open, "
+            f"<p>All {MOMENTUM_CANDLE_COUNT} candles closed above their open "
+            "<em>and</em> above the previous candle's close, "
             f"with the {MOMENTUM_TREND_FAST_PERIOD} EMA above the "
             f"{MOMENTUM_TREND_SLOW_PERIOD} EMA and the close above the "
             f"{MOMENTUM_TREND_SLOW_PERIOD} EMA on every one of them, on "

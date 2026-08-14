@@ -39,16 +39,24 @@ API_ERROR_ALERT_THRESHOLD = 5
 # alerts.py -- a typo or a stale key raises at import rather than silently
 # leaving a strategy off.
 #
-# Currently on: momentum_surge (the coarsest and fastest-firing of the six)
-# and trend_momentum_surge, which is the same move filtered down to the ones
-# happening in a 9/21 uptrend. The other four are opt-in. Note that turning
-# ema9_pullback off gives up the only analysis fast enough to catch the first
-# dip after a momentum_surge impulse -- the surge alerts stand alone.
+# Currently on: momentum_surge and trend_momentum_surge. The other four are
+# opt-in. Note that turning ema9_pullback off gives up the only analysis fast
+# enough to catch the first dip after a momentum_surge impulse -- the surge
+# alerts stand alone.
 #
-# The two momentum analyses deliberately overlap: every trend_momentum_surge
-# hit is also a momentum_surge hit, so a pair in a clean uptrend appears in
-# both email sections. Turn momentum_surge off to see only the trend-confirmed
-# subset.
+# The two momentum analyses read the same 3-candle window but ask different
+# questions, and neither is a subset of the other:
+#
+#   - momentum_surge asks how big the move was: >= 5%, ending in a 21/50 EMA
+#     uptrend measured on the signal candle.
+#   - trend_momentum_surge asks what shape it was: three green candles each
+#     closing higher than the last, above a 9/21 pair stacked on every one of
+#     them, at any size.
+#
+# A pair showing up in both sections is the strongest version of the signal.
+# momentum_surge is also the expensive one -- its 50 EMA warmup sets the
+# per-pair fetch at 201 candles, against the 97 trend_momentum_surge needs on
+# its own.
 # -----------------------------------------------------------------------------
 
 ENABLED_ANALYSES = {
@@ -179,15 +187,30 @@ EMA_PULLBACK_MIN_BODY_ATR = 0.15
 # -----------------------------------------------------------------------------
 # Momentum-surge settings
 #
-# "momentum_surge": two tests, both on the signal window. Alert when price has
-# moved MOMENTUM_PRICE_CHANGE_PCT or more over the last MOMENTUM_CANDLE_COUNT
+# "momentum_surge": three tests. Alert when price has moved
+# MOMENTUM_PRICE_CHANGE_PCT or more over the last MOMENTUM_CANDLE_COUNT
 # candles AND average quote volume across those same candles clears
-# MOMENTUM_MIN_AVG_SIGNAL_VOLUME. No candle-quality or ATR filters, and
-# (since the EMA filter was removed) no trend condition.
+# MOMENTUM_MIN_AVG_SIGNAL_VOLUME AND the pair is in an uptrend on the signal
+# candle -- close above both the EMA_FAST_PERIOD (21) and EMA_SLOW_PERIOD (50)
+# EMA, with the 21 EMA above the 50 EMA. Still no candle-quality or ATR
+# filters.
 #
-# Because the 21/50 EMA check is gone, hits are not confirmed to be in an
-# uptrend: a bounce inside a sustained downtrend alerts the same as a genuine
-# impulse, and "direction": "UP" describes only the sign of the move.
+# The uptrend filter was removed in 5d7ae06 and restored on 2026-08-14, so
+# "direction": "UP" once again means the move happened inside a 21/50 uptrend
+# rather than merely describing the sign of three candles. A dead-cat bounce
+# partway down a sustained decline no longer fires.
+#
+# Restoring it costs fetch size: the 50 EMA's warmup makes
+# _ema_closed_candles_needed() (200 closed candles) the binding constraint
+# again, so each pair requests 201 rows instead of 98. That is the same size
+# this analysis needed before 5d7ae06, and it is still well inside Kraken's
+# 720-row OHLC cap. trend_momentum_surge is unaffected -- it still needs only
+# 97, so turning momentum_surge off takes the fetch straight back down.
+#
+# It is checked on the signal candle only, unlike trend_momentum_surge, which
+# checks its faster 9/21 pair on every candle of the window. The two are still
+# different questions: a big move that ends in a 21/50 uptrend, versus a
+# staircase of any size inside a 9/21 uptrend.
 #
 # The volume floor below is absolute, and deliberately different in kind from
 # the two filters this analysis is still exempt from:
@@ -204,9 +227,11 @@ EMA_PULLBACK_MIN_BODY_ATR = 0.15
 # pair can be filtered out if its 5% move happened on almost no volume. Both
 # are intended.
 #
-# Two knobs now change how many alerts arrive: MOMENTUM_PRICE_CHANGE_PCT and
-# MOMENTUM_MIN_AVG_SIGNAL_VOLUME. MIN_24H_QUOTE_VOLUME and
-# REQUIRE_LIQUIDITY_FILTER still only move where the badge flips colour.
+# Three things now change how many alerts arrive: MOMENTUM_PRICE_CHANGE_PCT,
+# MOMENTUM_MIN_AVG_SIGNAL_VOLUME and the uptrend filter (tunable only by
+# changing EMA_FAST_PERIOD/EMA_SLOW_PERIOD, which ema_trend_pullback shares).
+# MIN_24H_QUOTE_VOLUME and REQUIRE_LIQUIDITY_FILTER still only move where the
+# badge flips colour.
 # -----------------------------------------------------------------------------
 
 MOMENTUM_CANDLE_COUNT = 3
@@ -216,16 +241,14 @@ MOMENTUM_PRICE_CHANGE_PCT = 5.0
 # Compared with >=, matching the other MIN_* floors in this file.
 #
 # This is the one volume check that can block a momentum_surge alert. Setting
-# it to 0 disables it and restores the "price test only" behaviour -- and is
-# the only way the "n/a" relative-volume rendering in alerts.py becomes
-# reachable again, since a window clearing a positive floor here always leaves
-# a positive baseline to divide by.
+# it to 0 disables it -- and is the only way the "n/a" relative-volume
+# rendering in alerts.py becomes reachable again, since a window clearing a
+# positive floor here always leaves a positive baseline to divide by.
 MOMENTUM_MIN_AVG_SIGNAL_VOLUME = 5_000.0
 
-# Sizes the relative-volume figure printed on each alert. It no longer decides
-# whether one fires, and it no longer sizes the Kraken fetch either -- with the
-# EMA warmup gone, VOLUME_LOOKBACK (the 24h badge window) is the larger
-# requirement, so raising this below 96 costs nothing.
+# Sizes the relative-volume figure printed on each alert. It does not decide
+# whether one fires, and it does not size the Kraken fetch either -- the 50 EMA
+# warmup (200 candles) dwarfs it, so raising this below 200 costs nothing.
 MOMENTUM_VOLUME_LOOKBACK = 20
 
 
@@ -235,13 +258,22 @@ MOMENTUM_VOLUME_LOOKBACK = 20
 # "trend_momentum_surge": the same window as momentum_surge
 # (MOMENTUM_CANDLE_COUNT candles) and the same volume floor
 # (MOMENTUM_MIN_AVG_SIGNAL_VOLUME), but the *shape* of the move rather than its
-# size. Three conditions, all checked on *every* candle of the window rather
+# size. Four conditions, all checked on *every* candle of the window rather
 # than only the last one:
 #
 #   1. the candle closed above its open (a real up candle, not a wick that
 #      happened to land higher),
-#   2. the 9 EMA was above the 21 EMA, and
-#   3. the close was above the 21 EMA.
+#   2. the candle closed above the previous candle's close,
+#   3. the 9 EMA was above the 21 EMA, and
+#   4. the close was above the 21 EMA.
+#
+# (1) and (2) are not the same test and neither implies the other: a candle
+# that gaps up and fades closes above the previous close while printing red,
+# and one that opens below the previous close and recovers only part of the
+# way is green while the sequence of closes steps down. Together they mean the
+# window is a staircase -- each bar both bullish in itself and higher than the
+# last. (2) compares the window's first candle against the bar immediately
+# *before* the window, so "every candle" really is every candle.
 #
 # Checking all three candles is the strict reading: it means the whole run
 # happened inside an established 9/21 uptrend, not that the move itself dragged
@@ -272,18 +304,24 @@ MOMENTUM_TREND_FAST_PERIOD = 9
 MOMENTUM_TREND_SLOW_PERIOD = 21
 
 # Deliberately 0, not MOMENTUM_PRICE_CHANGE_PCT: size is momentum_surge's
-# question, and this analysis asks about structure instead. Compared with >=
-# against the window's open-to-close move, so at 0 it only rules out a window
-# that ended lower than it started -- which three green candles can still do if
-# a candle opens below the previous one's close. Keeping the comparison (rather
-# than dropping the test) means "direction": "UP" stays true of every hit.
+# question, and this analysis asks about structure instead.
+#
+# At 0 this test cannot actually reject anything -- green candles with rising
+# closes force the last close above the first open, so the move is always
+# positive. It is kept as the knob for putting a size floor back (set it to
+# 1.0 and sub-1% staircases stop alerting) and as the guarantee behind
+# "direction": "UP" if the candle conditions above are ever loosened.
 #
 # Measured over 12,060 candle evaluations (60 live Kraken pairs x ~2 days of
-# 15m candles, 2026-08-14, before cooldown): momentum_surge fired 77 times,
-# this analysis 80, and only 38 of those were the same candle. So the two
-# sections come out a similar size but overlap on less than half their hits --
-# 39 surges were rejected here as counter-trend, and 42 clean runs fired here
-# that were too small for the 5% bar. Median hit size here was +4.52%.
+# 15m candles, 2026-08-14, before cooldown): momentum_surge fired 71 times,
+# this analysis 65, and only 37 of those were the same candle. So the two
+# sections come out a similar size but overlap on about half their hits -- 34
+# surges did not qualify here (mostly closes that failed to step up cleanly),
+# and 28 staircases fired here that were too small for the 5% bar. Median hit
+# size here was +5.78%.
+#
+# (Requiring each close above the previous one, rather than only requiring
+# green candles, cut this analysis from 78 hits to 65 on that same sample.)
 #
 # Raise this if the section gets noisy: it is the one knob that trades alert
 # count against how big a move has to be to qualify.

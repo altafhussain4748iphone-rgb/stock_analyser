@@ -19,6 +19,8 @@ def test_momentum_surge_alert_is_formatted():
                 "average_baseline_volume": 90_000.0,
                 "quote_volume_24h": 2_100_000.0,
                 "volume_multiple": 1.33,
+                "ema_fast": 0.4300,
+                "ema_slow": 0.4100,
                 "volume_ok": True,
                 "signal_time": datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc),
                 "signal_epoch": 1,
@@ -54,6 +56,8 @@ def test_momentum_surge_thin_pair_is_badged_not_dropped():
                 "average_baseline_volume": 880.0,
                 "quote_volume_24h": 18_900.0,
                 "volume_multiple": 1.02,
+                "ema_fast": 0.4300,
+                "ema_slow": 0.4100,
                 "volume_ok": False,
                 "signal_time": datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc),
                 "signal_epoch": 1,
@@ -83,6 +87,8 @@ def test_momentum_surge_renders_undefined_volume_multiple():
                 "average_baseline_volume": 0.0,
                 "quote_volume_24h": 0.0,
                 "volume_multiple": None,
+                "ema_fast": 0.4300,
+                "ema_slow": 0.4100,
                 "volume_ok": False,
                 "signal_time": datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc),
                 "signal_epoch": 1,
@@ -176,20 +182,42 @@ def test_momentum_surge_floor_is_independent_of_the_badge():
     assert hit["volume_ok"] is False
 
 
-def test_momentum_surge_fires_on_a_bounce_inside_a_downtrend():
-    """The 21/50 EMA filter is gone: trend direction no longer gates a hit."""
+def test_momentum_surge_skips_a_bounce_inside_a_downtrend():
+    """The 21/50 EMA filter is back: trend direction gates a hit again."""
     downtrend = _momentum_series(drift=0.997)
 
     fast = ca.calculate_ema_series(downtrend, ca.EMA_FAST_PERIOD)
     slow = ca.calculate_ema_series(downtrend, ca.EMA_SLOW_PERIOD)
-    # Confirm the fixture really is a downtrend by the old filter's own test,
-    # so this asserts the filter's removal rather than a weak fixture.
+    # Confirm the fixture really is a downtrend by the filter's own test, so
+    # this asserts the filter rather than a weak fixture.
     assert fast[-1] < slow[-1]
 
-    hit = ca.evaluate_momentum_surge_candles("X", "X/USD", downtrend)
+    assert ca.evaluate_momentum_surge_candles("X", "X/USD", downtrend) is None
+
+
+def test_momentum_surge_reports_the_uptrend_it_fired_in():
+    """A hit carries the EMA pair that qualified it, for the email body."""
+    hit = ca.evaluate_momentum_surge_candles("X", "X/USD", _momentum_series())
+
     assert hit is not None
-    assert hit["direction"] == "UP"
-    assert hit["price_change_pct"] >= ca.MOMENTUM_PRICE_CHANGE_PCT
+    assert hit["close"] > hit["ema_fast"] > hit["ema_slow"]
+    assert hit["close"] > hit["ema_slow"]
+
+
+def test_momentum_surge_needs_price_above_both_emas():
+    """Above the 21 EMA but under the 50 EMA is not an uptrend.
+
+    Built by flattening the run-up so the 50 EMA (a slower average of a
+    formerly higher price) still sits above the signal close.
+    """
+    candles = _momentum_series(drift=0.997)
+    fast = ca.calculate_ema_series(candles, ca.EMA_FAST_PERIOD)
+    slow = ca.calculate_ema_series(candles, ca.EMA_SLOW_PERIOD)
+    signal = candles[-1]
+
+    assert signal["close"] > fast[-1]  # cleared the fast EMA on the bounce
+    assert signal["close"] < slow[-1]  # but not the slow one
+    assert ca.evaluate_momentum_surge_candles("X", "X/USD", candles) is None
 
 
 def test_momentum_surge_still_requires_the_price_move():
@@ -237,10 +265,15 @@ def test_trend_momentum_surge_fires_in_an_uptrend():
 
 
 def test_trend_momentum_surge_skips_a_bounce_inside_a_downtrend():
-    """The whole point of the analysis: the same bounce momentum_surge takes."""
+    """Rejected by its own 9/21 test, independently of momentum_surge's 21/50
+    filter -- both analyses decline this bounce, for different reasons.
+    """
     downtrend = _momentum_series(drift=0.997)
 
-    assert ca.evaluate_momentum_surge_candles("X", "X/USD", downtrend) is not None
+    fast = ca.calculate_ema_series(downtrend, ca.MOMENTUM_TREND_FAST_PERIOD)
+    slow = ca.calculate_ema_series(downtrend, ca.MOMENTUM_TREND_SLOW_PERIOD)
+    assert fast[-1] < slow[-1]
+
     assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", downtrend) is None
 
 
@@ -257,7 +290,6 @@ def test_trend_momentum_surge_requires_the_cross_to_predate_the_window():
     assert fast[-1] > slow[-1]
     assert fast[-2] < slow[-2]
 
-    assert ca.evaluate_momentum_surge_candles("X", "X/USD", candles) is not None
     assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles) is None
 
 
@@ -280,6 +312,45 @@ def test_trend_momentum_surge_requires_every_candle_to_close_up():
     assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles) is None
 
 
+def test_trend_momentum_surge_requires_each_close_above_the_previous():
+    """A green candle that still closes below the previous close breaks it.
+
+    The middle candle here opens well below the first candle's close and
+    recovers only part of the way: green in itself, but the sequence of closes
+    steps down, so the window is not a staircase.
+    """
+    candles = _momentum_series()
+    first, middle = candles[-3], candles[-2]
+
+    middle["open"] = first["close"] * 0.97
+    middle["close"] = first["close"] * 0.99
+    middle["low"] = middle["open"]
+
+    assert middle["close"] > middle["open"]  # still a green candle
+    assert middle["close"] < first["close"]  # but a lower close
+    assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles) is None
+
+
+def test_trend_momentum_surge_checks_the_candle_before_the_window():
+    """"Every candle" includes the first, so the comparison reaches back one
+    bar past the window rather than only checking within it.
+    """
+    candles = _momentum_series()
+    assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles) is not None
+
+    # Lift the bar immediately before the window above the window's first
+    # close. Nothing inside the window changes -- all three candles are still
+    # green and still step up relative to each other.
+    before = candles[-4]
+    before["close"] = candles[-3]["close"] * 1.01
+    before["high"] = before["close"]
+
+    window = candles[-3:]
+    assert all(c["close"] > c["open"] for c in window)
+    assert window[2]["close"] > window[1]["close"] > window[0]["close"]
+    assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles) is None
+
+
 def test_trend_momentum_surge_ignores_the_momentum_price_bar():
     """It is not a subset of momentum_surge: a small clean run still fires.
 
@@ -296,19 +367,21 @@ def test_trend_momentum_surge_ignores_the_momentum_price_bar():
     assert hit["ema_fast"] > hit["ema_slow"]
 
 
-def test_trend_momentum_surge_still_requires_a_net_up_move():
-    """MOMENTUM_TREND_PRICE_CHANGE_PCT is 0, not absent -- "direction": "UP"
-    has to stay true, so a window that ends below where it opened is rejected.
+def test_trend_momentum_surge_price_floor_is_a_working_knob():
+    """At 0 the price test cannot fail -- green candles with rising closes
+    always imply a positive move -- so this raises it to check it still bites.
     """
-    candles = _momentum_series()
-    window = candles[-3:]
-    # Every candle stays green, but the first one opens high enough that the
-    # window's open-to-close move is negative.
-    window[0]["open"] = window[-1]["close"] * 1.05
-    window[0]["close"] = window[0]["open"] * 1.001
-    window[0]["high"] = window[0]["close"]
+    candles = _momentum_series(move=1.001)
+    assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles) is not None
 
-    assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles) is None
+    original = ca.MOMENTUM_TREND_PRICE_CHANGE_PCT
+    ca.MOMENTUM_TREND_PRICE_CHANGE_PCT = 1.0
+    try:
+        assert ca.evaluate_trend_momentum_surge_candles(
+            "X", "X/USD", candles
+        ) is None
+    finally:
+        ca.MOMENTUM_TREND_PRICE_CHANGE_PCT = original
 
 
 def test_trend_momentum_surge_still_applies_the_volume_floor():
