@@ -39,16 +39,23 @@ API_ERROR_ALERT_THRESHOLD = 5
 # alerts.py -- a typo or a stale key raises at import rather than silently
 # leaving a strategy off.
 #
-# Currently on: momentum_surge (the coarsest and fastest-firing of the five)
-# and nothing else. The other four are opt-in. Note that turning ema9_pullback
-# off gives up the only analysis fast enough to catch the first dip after a
-# momentum_surge impulse -- the surge alert now stands alone.
+# Currently on: momentum_surge (the coarsest and fastest-firing of the six)
+# and trend_momentum_surge, which is the same move filtered down to the ones
+# happening in a 9/21 uptrend. The other four are opt-in. Note that turning
+# ema9_pullback off gives up the only analysis fast enough to catch the first
+# dip after a momentum_surge impulse -- the surge alerts stand alone.
+#
+# The two momentum analyses deliberately overlap: every trend_momentum_surge
+# hit is also a momentum_surge hit, so a pair in a clean uptrend appears in
+# both email sections. Turn momentum_surge off to see only the trend-confirmed
+# subset.
 # -----------------------------------------------------------------------------
 
 ENABLED_ANALYSES = {
     "breakout": False,
     "ema_trend_pullback": False,
     "momentum_surge": True,
+    "trend_momentum_surge": True,
     "ema9_pullback": False,
     "ema50_pullback": False,
 }
@@ -220,6 +227,72 @@ MOMENTUM_MIN_AVG_SIGNAL_VOLUME = 5_000.0
 # EMA warmup gone, VOLUME_LOOKBACK (the 24h badge window) is the larger
 # requirement, so raising this below 96 costs nothing.
 MOMENTUM_VOLUME_LOOKBACK = 20
+
+
+# -----------------------------------------------------------------------------
+# Trend momentum-surge settings
+#
+# "trend_momentum_surge": the same window as momentum_surge
+# (MOMENTUM_CANDLE_COUNT candles) and the same volume floor
+# (MOMENTUM_MIN_AVG_SIGNAL_VOLUME), but the *shape* of the move rather than its
+# size. Three conditions, all checked on *every* candle of the window rather
+# than only the last one:
+#
+#   1. the candle closed above its open (a real up candle, not a wick that
+#      happened to land higher),
+#   2. the 9 EMA was above the 21 EMA, and
+#   3. the close was above the 21 EMA.
+#
+# Checking all three candles is the strict reading: it means the whole run
+# happened inside an established 9/21 uptrend, not that the move itself dragged
+# the EMAs into line by its last bar. That excludes the freshest 9/21 crosses,
+# which is the trade-off -- momentum_surge still fires on those (whenever they
+# clear its 5% bar), they just aren't badged as trend-confirmed. To relax it,
+# compare only the last element of each EMA window in
+# evaluate_trend_momentum_surge_candles.
+#
+# This analysis is NOT a subset of momentum_surge. It applies its own price
+# threshold, MOMENTUM_TREND_PRICE_CHANGE_PCT below, which is 0 -- three green
+# candles stacked over a rising 9/21 pair is the signal, whatever its size. So
+# most of its hits are moves far under MOMENTUM_PRICE_CHANGE_PCT that
+# momentum_surge never sees, and the two email sections overlap only on the
+# rare move that is both big and clean.
+#
+# No ATR, slope or separation test: unlike the pullback analyses, which need
+# the EMAs to be meaningfully apart before a "touch" means anything, the
+# evidence here is the run of green candles holding above a stacked EMA pair.
+# The EMAs only answer "was this with the trend or against it".
+#
+# The 9/21 periods are duplicated from the ema9_pullback block rather than
+# imported from it so the two can be tuned independently -- a pullback and an
+# impulse ask different questions of the same EMA pair.
+# -----------------------------------------------------------------------------
+
+MOMENTUM_TREND_FAST_PERIOD = 9
+MOMENTUM_TREND_SLOW_PERIOD = 21
+
+# Deliberately 0, not MOMENTUM_PRICE_CHANGE_PCT: size is momentum_surge's
+# question, and this analysis asks about structure instead. Compared with >=
+# against the window's open-to-close move, so at 0 it only rules out a window
+# that ended lower than it started -- which three green candles can still do if
+# a candle opens below the previous one's close. Keeping the comparison (rather
+# than dropping the test) means "direction": "UP" stays true of every hit.
+#
+# Measured over 12,060 candle evaluations (60 live Kraken pairs x ~2 days of
+# 15m candles, 2026-08-14, before cooldown): momentum_surge fired 77 times,
+# this analysis 80, and only 38 of those were the same candle. So the two
+# sections come out a similar size but overlap on less than half their hits --
+# 39 surges were rejected here as counter-trend, and 42 clean runs fired here
+# that were too small for the 5% bar. Median hit size here was +4.52%.
+#
+# Raise this if the section gets noisy: it is the one knob that trades alert
+# count against how big a move has to be to qualify.
+MOMENTUM_TREND_PRICE_CHANGE_PCT = 0.0
+
+# Same 3x rule as EMA9_WARMUP_CANDLES: an EMA seeded from a plain SMA is
+# inaccurate for its first few periods, and here that error would show up as
+# false 9-over-21 orderings on pairs that just came into range.
+MOMENTUM_TREND_WARMUP_CANDLES = MOMENTUM_TREND_SLOW_PERIOD * 3
 
 
 # -----------------------------------------------------------------------------

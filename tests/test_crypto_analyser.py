@@ -45,6 +45,8 @@ def _momentum_surge_hit(**overrides):
         "average_baseline_volume": 90_000.0,
         "quote_volume_24h": 1_800_000.0,
         "volume_multiple": 1.33,
+        # Drives the LIQUID/THIN badge; render_momentum_surge_item requires it.
+        "volume_ok": True,
         "signal_time": datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc),
         "signal_epoch": 1,
         "alert_epoch": 1,

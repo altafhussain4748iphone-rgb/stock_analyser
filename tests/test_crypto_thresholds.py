@@ -216,6 +216,142 @@ def test_momentum_surge_fetches_a_full_24h_volume_window():
     assert hit["quote_volume_24h"] == expected
 
 
+# -----------------------------------------------------------------------------
+# trend_momentum_surge evaluator
+#
+# Same fixture as momentum_surge -- the analyses share their price and volume
+# tests, so `drift` is the only knob these tests need: it decides whether the
+# 9/21 pair is stacked when the move lands.
+# -----------------------------------------------------------------------------
+
+
+def test_trend_momentum_surge_fires_in_an_uptrend():
+    candles = _momentum_series()
+    hit = ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles)
+
+    assert hit is not None
+    assert hit["price_change_pct"] >= ca.MOMENTUM_PRICE_CHANGE_PCT
+    assert hit["ema_fast"] > hit["ema_slow"]
+    assert hit["ema_gap_pct"] > 0
+    assert hit["close"] > hit["ema_slow"]
+
+
+def test_trend_momentum_surge_skips_a_bounce_inside_a_downtrend():
+    """The whole point of the analysis: the same bounce momentum_surge takes."""
+    downtrend = _momentum_series(drift=0.997)
+
+    assert ca.evaluate_momentum_surge_candles("X", "X/USD", downtrend) is not None
+    assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", downtrend) is None
+
+
+def test_trend_momentum_surge_requires_the_cross_to_predate_the_window():
+    """A move violent enough to drag the 9 EMA over the 21 by its last candle
+    is still not a trend -- all three candles must already be stacked.
+    """
+    candles = _momentum_series(drift=0.997, move=1.05)
+
+    fast = ca.calculate_ema_series(candles, ca.MOMENTUM_TREND_FAST_PERIOD)
+    slow = ca.calculate_ema_series(candles, ca.MOMENTUM_TREND_SLOW_PERIOD)
+    # Confirm the fixture is the case being tested: crossed on the last candle
+    # of the window only.
+    assert fast[-1] > slow[-1]
+    assert fast[-2] < slow[-2]
+
+    assert ca.evaluate_momentum_surge_candles("X", "X/USD", candles) is not None
+    assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles) is None
+
+
+def test_trend_momentum_surge_requires_every_candle_to_close_up():
+    """One red candle mid-window disqualifies the move.
+
+    The +5% total is untouched (it is measured from the window's first open to
+    the last close), so this isolates the consecutive-up-candles condition.
+    """
+    candles = _momentum_series()
+    assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles) is not None
+
+    middle = candles[-2]
+    middle["open"] = middle["close"] * 1.001
+    middle["high"] = middle["open"]
+
+    hit = ca.evaluate_momentum_surge_candles("X", "X/USD", candles)
+    assert hit is not None
+    assert hit["price_change_pct"] >= ca.MOMENTUM_PRICE_CHANGE_PCT
+    assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles) is None
+
+
+def test_trend_momentum_surge_ignores_the_momentum_price_bar():
+    """It is not a subset of momentum_surge: a small clean run still fires.
+
+    Three green candles of +0.1% each is nowhere near MOMENTUM_PRICE_CHANGE_PCT,
+    so momentum_surge declines it -- structure, not size, is the question here.
+    """
+    candles = _momentum_series(move=1.001)
+
+    assert ca.evaluate_momentum_surge_candles("X", "X/USD", candles) is None
+
+    hit = ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles)
+    assert hit is not None
+    assert hit["price_change_pct"] < ca.MOMENTUM_PRICE_CHANGE_PCT
+    assert hit["ema_fast"] > hit["ema_slow"]
+
+
+def test_trend_momentum_surge_still_requires_a_net_up_move():
+    """MOMENTUM_TREND_PRICE_CHANGE_PCT is 0, not absent -- "direction": "UP"
+    has to stay true, so a window that ends below where it opened is rejected.
+    """
+    candles = _momentum_series()
+    window = candles[-3:]
+    # Every candle stays green, but the first one opens high enough that the
+    # window's open-to-close move is negative.
+    window[0]["open"] = window[-1]["close"] * 1.05
+    window[0]["close"] = window[0]["open"] * 1.001
+    window[0]["high"] = window[0]["close"]
+
+    assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles) is None
+
+
+def test_trend_momentum_surge_still_applies_the_volume_floor():
+    """The one momentum_surge gate it does keep."""
+    assert ca.evaluate_trend_momentum_surge_candles(
+        "X", "X/USD",
+        _momentum_series(signal_volume=ca.MOMENTUM_MIN_AVG_SIGNAL_VOLUME - 1),
+    ) is None
+
+
+def test_trend_momentum_surge_alert_is_formatted():
+    hits_by_analysis = {
+        "trend_momentum_surge": [
+            {
+                "pair": "ADA/USD",
+                "pair_key": "ADAUSD",
+                "direction": "UP",
+                "price_change_pct": 6.5,
+                "close": 0.4430,
+                "ema_fast": 0.4300,
+                "ema_slow": 0.4100,
+                "ema_gap_pct": 4.88,
+                "average_signal_volume": 120_000.0,
+                "average_baseline_volume": 90_000.0,
+                "quote_volume_24h": 2_100_000.0,
+                "volume_multiple": 1.33,
+                "volume_ok": True,
+                "signal_time": datetime(2026, 7, 18, 12, 0, tzinfo=timezone.utc),
+                "signal_epoch": 1,
+                "alert_epoch": 1,
+            }
+        ],
+    }
+
+    subject, body = build_combined_email(hits_by_analysis, 15, False)
+
+    assert "1 trend momentum surge alerts" in subject
+    assert "ADA/USD" in body
+    assert "UP trend momentum +6.50%" in body
+    assert "3 consecutive up candles" in body
+    assert "#e8f5e9" in body  # LIQUID badge rendered
+
+
 def test_ema50_pullback_alert_is_formatted():
     hits_by_analysis = {
         "ema50_pullback": [

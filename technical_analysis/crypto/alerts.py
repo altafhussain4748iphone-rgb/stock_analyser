@@ -60,6 +60,10 @@ from technical_analysis.crypto.config import (
     MOMENTUM_CANDLE_COUNT,
     MOMENTUM_MIN_AVG_SIGNAL_VOLUME,
     MOMENTUM_PRICE_CHANGE_PCT,
+    MOMENTUM_TREND_FAST_PERIOD,
+    MOMENTUM_TREND_PRICE_CHANGE_PCT,
+    MOMENTUM_TREND_SLOW_PERIOD,
+    MOMENTUM_TREND_WARMUP_CANDLES,
     MOMENTUM_VOLUME_LOOKBACK,
     QUOTE_FILTER,
     REQUEST_DELAY_SEC,
@@ -1344,10 +1348,18 @@ def render_ema50_pullback_item(hit):
 # -----------------------------------------------------------------------------
 
 
-def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
-    if len(closed_candles) < _momentum_surge_closed_candles_needed():
-        return None
+def _momentum_window_stats(closed_candles):
+    """Price and volume measurements for the shared momentum signal window.
 
+    Both momentum analyses measure the same window and share the volume floor,
+    so that arithmetic lives here rather than being duplicated and left to
+    drift. The *price* threshold is deliberately not applied here: the two
+    analyses use different ones (MOMENTUM_PRICE_CHANGE_PCT vs
+    MOMENTUM_TREND_PRICE_CHANGE_PCT), so each caller compares
+    `price_change_pct` against its own. Returns None when the window opens at a
+    non-positive price (bad data), the one case neither caller can express as a
+    percentage.
+    """
     window = closed_candles[-MOMENTUM_CANDLE_COUNT:]
     signal_candle = window[-1]
 
@@ -1378,33 +1390,23 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
         else None
     )
 
-    passes_price = price_change_pct >= MOMENTUM_PRICE_CHANGE_PCT
-    passes_signal_volume = average_signal_volume >= MOMENTUM_MIN_AVG_SIGNAL_VOLUME
+    return {
+        "window": window,
+        "signal_candle": signal_candle,
+        "price_change_pct": price_change_pct,
+        "average_signal_volume": average_signal_volume,
+        "average_baseline_volume": average_baseline_volume,
+        "volume_multiple": volume_multiple,
+        "passes_signal_volume": (
+            average_signal_volume >= MOMENTUM_MIN_AVG_SIGNAL_VOLUME
+        ),
+    }
 
-    # Computed for the badge only -- neither of these can suppress a hit. Note
-    # `volume_ok` (trailing 24h) is independent of `passes_signal_volume` (this
-    # move): a quiet pair that wakes up fires while badged THIN.
-    _, volume_ok, quote_volume_24h = _liquidity_stats(
-        closed_candles[:-1], signal_candle
-    )
 
-    log.debug(
-        "%s: momentum_surge price=%+.2f%% signal_volume=%.2f "
-        "baseline_volume=%.2f multiple=%s quote_volume_24h=%.2f "
-        "filters(price=%s signal_volume=%s) badge(volume_ok=%s)",
-        wsname or pair,
-        price_change_pct,
-        average_signal_volume,
-        average_baseline_volume,
-        f"{volume_multiple:.2f}x" if volume_multiple is not None else "n/a",
-        quote_volume_24h,
-        passes_price,
-        passes_signal_volume,
-        volume_ok,
-    )
-
-    if not (passes_price and passes_signal_volume):
-        return None
+def _momentum_hit(pair, wsname, stats, quote_volume_24h, volume_ok):
+    """The hit dict fields both momentum analyses report identically."""
+    window = stats["window"]
+    signal_candle = stats["signal_candle"]
 
     return {
         "pair": wsname or pair,
@@ -1414,15 +1416,55 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
         "high": max(candle["high"] for candle in window),
         "low": min(candle["low"] for candle in window),
         "close": signal_candle["close"],
-        "price_change_pct": price_change_pct,
-        "average_signal_volume": average_signal_volume,
-        "average_baseline_volume": average_baseline_volume,
-        "volume_multiple": volume_multiple,
+        "price_change_pct": stats["price_change_pct"],
+        "average_signal_volume": stats["average_signal_volume"],
+        "average_baseline_volume": stats["average_baseline_volume"],
+        "volume_multiple": stats["volume_multiple"],
         "quote_volume_24h": quote_volume_24h,
         "volume_ok": volume_ok,
         "signal_time": to_display_datetime(signal_candle["time"]),
         "signal_epoch": signal_candle["time"],
     }
+
+
+def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
+    if len(closed_candles) < _momentum_surge_closed_candles_needed():
+        return None
+
+    stats = _momentum_window_stats(closed_candles)
+    if stats is None:
+        return None
+
+    passes_price = stats["price_change_pct"] >= MOMENTUM_PRICE_CHANGE_PCT
+
+    # Computed for the badge only -- neither of these can suppress a hit. Note
+    # `volume_ok` (trailing 24h) is independent of `passes_signal_volume` (this
+    # move): a quiet pair that wakes up fires while badged THIN.
+    _, volume_ok, quote_volume_24h = _liquidity_stats(
+        closed_candles[:-1], stats["signal_candle"]
+    )
+
+    log.debug(
+        "%s: momentum_surge price=%+.2f%% signal_volume=%.2f "
+        "baseline_volume=%.2f multiple=%s quote_volume_24h=%.2f "
+        "filters(price=%s signal_volume=%s) badge(volume_ok=%s)",
+        wsname or pair,
+        stats["price_change_pct"],
+        stats["average_signal_volume"],
+        stats["average_baseline_volume"],
+        f"{stats['volume_multiple']:.2f}x"
+        if stats["volume_multiple"] is not None
+        else "n/a",
+        quote_volume_24h,
+        passes_price,
+        stats["passes_signal_volume"],
+        volume_ok,
+    )
+
+    if not (passes_price and stats["passes_signal_volume"]):
+        return None
+
+    return _momentum_hit(pair, wsname, stats, quote_volume_24h, volume_ok)
 
 
 def _momentum_surge_closed_candles_needed():
@@ -1520,6 +1562,178 @@ def render_momentum_surge_item(hit):
 
 
 # -----------------------------------------------------------------------------
+# Trend momentum-surge evaluation
+#
+# evaluate_trend_momentum_surge_candles: the shape of the move rather than its
+# size. Over the same MOMENTUM_CANDLE_COUNT window momentum_surge measures,
+# *every* candle must have closed above its open, with the 9 EMA above the 21
+# EMA and the close above the 21 EMA at that candle. It shares
+# momentum_surge's volume floor but applies its own price threshold,
+# MOMENTUM_TREND_PRICE_CHANGE_PCT, which is 0 -- so this is NOT a subset of
+# momentum_surge, and most of its hits are moves far too small for the 5% bar.
+#
+# Requiring the EMA state on all three candles (not just the signal one) is
+# what makes this "a run inside an existing uptrend" rather than "a move big
+# enough to drag the 9 EMA over the 21 by its last bar". See the config block
+# for the trade-off.
+#
+# The LIQUID/THIN badge behaves exactly as it does for momentum_surge: it is
+# computed from trailing 24h volume and can never suppress a hit.
+# -----------------------------------------------------------------------------
+
+
+def _trend_momentum_surge_closed_candles_needed():
+    # Whichever is larger: momentum_surge's 24h badge window, or the 21 EMA
+    # plus its warmup. At today's settings the badge window (97) still wins,
+    # so adding this analysis does not grow the per-pair Kraken fetch.
+    return max(
+        _momentum_surge_closed_candles_needed(),
+        MOMENTUM_TREND_SLOW_PERIOD + MOMENTUM_TREND_WARMUP_CANDLES,
+    )
+
+
+def evaluate_trend_momentum_surge_candles(pair, wsname, closed_candles):
+    if len(closed_candles) < _trend_momentum_surge_closed_candles_needed():
+        return None
+
+    stats = _momentum_window_stats(closed_candles)
+    if stats is None:
+        return None
+
+    fast_series = calculate_ema_series(closed_candles, MOMENTUM_TREND_FAST_PERIOD)
+    slow_series = calculate_ema_series(closed_candles, MOMENTUM_TREND_SLOW_PERIOD)
+    if (
+        len(fast_series) < MOMENTUM_CANDLE_COUNT
+        or len(slow_series) < MOMENTUM_CANDLE_COUNT
+    ):
+        return None
+
+    window = stats["window"]
+    signal_candle = stats["signal_candle"]
+
+    # Both series end at closed_candles[-1], so slicing the same number of
+    # values off each end lines them up candle for candle with `window`.
+    fast_window = fast_series[-MOMENTUM_CANDLE_COUNT:]
+    slow_window = slow_series[-MOMENTUM_CANDLE_COUNT:]
+
+    all_candles_up = all(
+        candle["close"] > candle["open"] for candle in window
+    )
+    ema_stacked = all(
+        fast > slow for fast, slow in zip(fast_window, slow_window)
+    )
+    above_slow_ema = all(
+        candle["close"] > slow
+        for candle, slow in zip(window, slow_window)
+    )
+
+    ema_fast_now = fast_window[-1]
+    ema_slow_now = slow_window[-1]
+    ema_gap_pct = (
+        (ema_fast_now - ema_slow_now) / ema_slow_now * 100.0
+        if ema_slow_now > 0
+        else 0.0
+    )
+
+    # Its own threshold, not momentum_surge's: at 0 this only rules out a
+    # window that closed below where it opened, which three green candles can
+    # still do when one opens below the previous candle's close.
+    passes_price = stats["price_change_pct"] >= MOMENTUM_TREND_PRICE_CHANGE_PCT
+
+    # Badge only, as in momentum_surge -- it cannot suppress a hit.
+    _, volume_ok, quote_volume_24h = _liquidity_stats(
+        closed_candles[:-1], signal_candle
+    )
+
+    log.debug(
+        "%s: trend_momentum_surge price=%+.2f%% signal_volume=%.2f "
+        "ema_fast=%.6f ema_slow=%.6f gap=%+.2f%% quote_volume_24h=%.2f "
+        "filters(price=%s signal_volume=%s candles_up=%s ema_stacked=%s "
+        "above_slow_ema=%s) badge(volume_ok=%s)",
+        wsname or pair,
+        stats["price_change_pct"],
+        stats["average_signal_volume"],
+        ema_fast_now,
+        ema_slow_now,
+        ema_gap_pct,
+        quote_volume_24h,
+        passes_price,
+        stats["passes_signal_volume"],
+        all_candles_up,
+        ema_stacked,
+        above_slow_ema,
+        volume_ok,
+    )
+
+    if not (
+        passes_price
+        and stats["passes_signal_volume"]
+        and all_candles_up
+        and ema_stacked
+        and above_slow_ema
+    ):
+        return None
+
+    hit = _momentum_hit(pair, wsname, stats, quote_volume_24h, volume_ok)
+    hit["ema_fast"] = ema_fast_now
+    hit["ema_slow"] = ema_slow_now
+    hit["ema_gap_pct"] = ema_gap_pct
+    return hit
+
+
+def run_trend_momentum_surge_analysis(
+    pair,
+    wsname,
+    closed_candles,
+    interval_minutes,
+    require_next_candle_confirmation=False,
+):
+    hit = evaluate_trend_momentum_surge_candles(pair, wsname, closed_candles)
+    if hit is None:
+        return None
+
+    hit["alert_epoch"] = hit["signal_epoch"]
+    return hit
+
+
+def log_trend_momentum_surge_hit(hit, label):
+    log.info(
+        "HIT[trend_momentum_surge]: %s %s move %+.2f%% over %d up candles, "
+        "%d EMA %+.2f%% above the %d EMA, 24h volume %.0f [%s] (%s)",
+        hit["pair"],
+        hit["direction"],
+        hit["price_change_pct"],
+        MOMENTUM_CANDLE_COUNT,
+        MOMENTUM_TREND_FAST_PERIOD,
+        hit["ema_gap_pct"],
+        MOMENTUM_TREND_SLOW_PERIOD,
+        hit["quote_volume_24h"],
+        "LIQUID" if hit["volume_ok"] else "THIN",
+        label,
+    )
+
+
+def render_trend_momentum_surge_item(hit):
+    pair = html.escape(str(hit["pair"]))
+    signal_time = hit["signal_time"].strftime("%Y-%m-%d %H:%M %Z")
+
+    headline = f"{hit['direction']} trend momentum {hit['price_change_pct']:+.2f}%"
+    detail = (
+        f"close {format_price(hit['close'])}"
+        f" · {MOMENTUM_CANDLE_COUNT} consecutive up candles"
+        f" · {MOMENTUM_TREND_FAST_PERIOD} EMA {format_price(hit['ema_fast'])}"
+        f" / {MOMENTUM_TREND_SLOW_PERIOD} EMA {format_price(hit['ema_slow'])}"
+        f" ({hit['ema_gap_pct']:+.2f}%)"
+        f" · move volume {format_compact_volume(hit['average_signal_volume'])}/candle"
+        f" · 24h volume {format_compact_volume(hit['quote_volume_24h'])}"
+        f" · signal {signal_time}"
+    )
+    return _render_alert_card(
+        pair, headline, detail, badge=_render_volume_badge(hit["volume_ok"])
+    )
+
+
+# -----------------------------------------------------------------------------
 # Analysis registry
 #
 # Each entry is a self-contained analysis that runs against the *same*
@@ -1606,6 +1820,32 @@ ALL_ANALYSES = [
             f"<span style=\"color:#b71c1c;font-weight:700;\">THIN</span> = "
             "below it &mdash; a quiet pair that just woke up can clear the "
             "move-volume floor while still being badged THIN.</p>"
+        ),
+    },
+    {
+        "key": "trend_momentum_surge",
+        "section_title": "Trend Momentum Surge Alerts",
+        "run": run_trend_momentum_surge_analysis,
+        "closed_candles_needed": lambda _confirm: _trend_momentum_surge_closed_candles_needed(),
+        "sort_key": lambda hit: hit["price_change_pct"],
+        "log_hit": log_trend_momentum_surge_hit,
+        "render_item": render_trend_momentum_surge_item,
+        "section_intro": lambda _confirm_label: (
+            f"<p>All {MOMENTUM_CANDLE_COUNT} candles closed above their open, "
+            f"with the {MOMENTUM_TREND_FAST_PERIOD} EMA above the "
+            f"{MOMENTUM_TREND_SLOW_PERIOD} EMA and the close above the "
+            f"{MOMENTUM_TREND_SLOW_PERIOD} EMA on every one of them, on "
+            f"average volume of &ge; "
+            f"{format_compact_volume(MOMENTUM_MIN_AVG_SIGNAL_VOLUME)} per "
+            "candle. <strong>There is no minimum move size</strong> "
+            f"(momentum surge's {MOMENTUM_PRICE_CHANGE_PCT:.1f}% bar does not "
+            "apply here), so these are graded on structure rather than size "
+            "&mdash; a clean run with the trend, however small. The badge is "
+            "the same trailing measure and never blocks an alert: "
+            f"<span style=\"color:#1b5e20;font-weight:700;\">LIQUID</span> = "
+            f"24h volume &ge; {format_compact_volume(MIN_24H_QUOTE_VOLUME)}, "
+            f"<span style=\"color:#b71c1c;font-weight:700;\">THIN</span> = "
+            "below it.</p>"
         ),
     },
     {

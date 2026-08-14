@@ -1,9 +1,9 @@
 # Crypto Alert Strategies
 
-`technical_analysis/crypto/alerts.py` runs five independent analyses against
+`technical_analysis/crypto/alerts.py` runs six independent analyses against
 one shared Kraken 15-minute candle fetch per pair (see the `ANALYSES`
 registry). Each scan sends **one combined email** with a section per analysis
-that had hits. All five only alert on upside signals — no DOWN/bearish
+that had hits. All six only alert on upside signals — no DOWN/bearish
 alerts are sent. This document explains what each analysis actually checks
 and walks through example trades in a few different market scenarios —
 including scenarios where the strategy is *wrong*, since that's just as
@@ -17,44 +17,58 @@ outcome.
 ### Each analysis can be switched on or off
 
 `ENABLED_ANALYSES` in `technical_analysis/crypto/config.py` is the master
-on/off switch per analysis. **Only `momentum_surge` is enabled**; the other
-four are opt-in:
+on/off switch per analysis. **Only the two momentum analyses are enabled**;
+the other four are opt-in:
 
 ```python
 ENABLED_ANALYSES = {
     "breakout": False,
     "ema_trend_pullback": False,
     "momentum_surge": True,
+    "trend_momentum_surge": True,
     "ema9_pullback": False,
     "ema50_pullback": False,
 }
 ```
 
+The two enabled ones ask different questions about the same 3-candle window.
+`momentum_surge` asks **how big** the move was (≥ 5%, no trend condition);
+`trend_momentum_surge` asks **what shape** it was (three green candles above a
+stacked 9/21 EMA pair, no minimum size). Neither is a subset of the other.
+Measured over 12,060 candle evaluations — 60 pairs × ~2 days of 15m candles,
+2026-08-14, before cooldown — they fired 77 and 80 times respectively and
+agreed on only **38** of those candles. When a pair does appear in both
+sections, that is the strongest version of the signal: a large move that was
+also structurally clean.
+
 Note what turning `ema9_pullback` off gives up: it was the one analysis fast
-enough to catch the *first* dip after a `momentum_surge` impulse (see §4
-below), so the surge alert now stands alone rather than being followed by an
+enough to catch the *first* dip after a `momentum_surge` impulse (see §5
+below), so the surge alerts now stand alone rather than being followed by an
 entry-shaped pullback signal on the same pair.
 
 A disabled analysis is not registered at all — it never evaluates a candle
 and never contributes an email section. Its candle requirement is also
-excluded from the shared per-pair fetch, so `momentum_surge` alone fetches
+excluded from the shared per-pair fetch, so the two momentum analyses fetch
 **98** candles per pair rather than the 601 that `ema50_pullback` demands.
 That number dropped from 201 when the EMA filter was removed from
 `momentum_surge`: without an EMA warmup to satisfy, its requirement is now
 set by the 96-candle window behind the 24h volume badge rather than by the
-200-candle 50 EMA. Cooldown state for a disabled analysis is left untouched
-in the state file, so re-enabling it resumes where it left off rather than
-re-alerting on pairs it had already covered.
+200-candle 50 EMA. `trend_momentum_surge` does not push it back up — its 21
+EMA plus warmup needs only 84 candles, comfortably inside that 98. Cooldown
+state for a disabled analysis is left untouched in the state file, so
+re-enabling it resumes where it left off rather than re-alerting on pairs it
+had already covered.
 
-The rest of this document describes all five analyses regardless of whether
+The rest of this document describes all six analyses regardless of whether
 they are currently enabled.
 
-### Two liquidity filters apply to four of the five analyses
+### Two liquidity filters apply to four of the six analyses
 
-> **`momentum_surge` is exempt from both.** Neither filter below can suppress
-> a `momentum_surge` alert — it reports volume instead of gating on it, via a
-> LIQUID/THIN badge (see §3). Everything in this section applies to
-> `breakout`, `ema_trend_pullback`, `ema9_pullback` and `ema50_pullback`.
+> **Both momentum analyses are exempt from both filters.** Neither filter
+> below can suppress a `momentum_surge` or `trend_momentum_surge` alert — they
+> report volume instead of gating on it, via a LIQUID/THIN badge (see §3).
+> Everything in this section applies to `breakout`, `ema_trend_pullback`,
+> `ema9_pullback` and `ema50_pullback`.
 
 - **Per-candle liquidity filter** (`REQUIRE_LIQUIDITY_FILTER`, currently
   **on**): median quote volume over the trailing 96 candles ≥ **$1,000**,
@@ -65,8 +79,8 @@ they are currently enabled.
   on" check — a sum, not a median, so it can't be skewed low by one quiet
   candle — and its value is printed on every alert (`24h volume $X`) so you
   can sanity-check liquidity without cross-referencing anything. For
-  `momentum_surge` this same number is still computed and printed, but only
-  to colour the badge.
+  the two momentum analyses this same number is still computed and printed,
+  but only to colour the badge.
 - **`breakout` has one more, non-optional guard** on top of both filters
   above: it divides the signal candle's volume by the trailing 96-candle
   *median* volume to compute a volume multiple. If that median is exactly
@@ -342,7 +356,7 @@ trades on that candle alone) sat on a pair where **54 of the 96 trailing
 candles had zero volume and zero trades** — trailing median quote volume of
 exactly **$0**, far under the $1,000 per-candle minimum. Under the old rules
 that failed the liquidity filter outright and produced **no alert on any of
-the five analyses**.
+the six analyses**.
 
 Now `momentum_surge` **does alert** on it. The $110k that traded on the spike
 candle puts the 3-candle average far above the $5,000 move-volume floor, and
@@ -363,6 +377,10 @@ floor came down to $50,000. That whole line of tuning is now moot for
 other four analyses.
 
 ### Scenario E — now fires: a bounce inside a downtrend
+
+> This is the exact case §4 exists to separate out: the same candles are
+> evaluated by `trend_momentum_surge`, which **does not** fire on them.
+
 
 A token has bled −45% over two days. Price is well below both the 21 and 50
 EMA, with the 21 EMA below the 50 EMA — a textbook downtrend. It then bounces
@@ -388,7 +406,137 @@ particular move traded $400 a candle.
 
 ---
 
-## 4. 9 EMA Pullback (`ema9_pullback`)
+## 4. Trend Momentum Surge (`trend_momentum_surge`)
+
+**What it checks:** the *shape* of a 3-candle move rather than its size. Over
+the same window §3 measures, every candle must have closed above its open,
+with the 9 EMA above the 21 EMA and the close above the 21 EMA — on **all
+three**, not just the last one. It keeps §3's $5,000 volume floor and drops
+its 5% price bar entirely.
+
+This is the answer to `momentum_surge`'s Scenario E: the dead-cat bounce is
+filtered out, because a pair bleeding downhill has its 9 EMA under its 21 EMA
+and its price under both.
+
+| Filter | Threshold |
+|---|---|
+| Price move over last 3 candles | **≥ 0%** (`MOMENTUM_TREND_PRICE_CHANGE_PCT`) — no minimum size |
+| Average quote volume over those 3 candles | ≥ **$5,000** per candle (`MOMENTUM_MIN_AVG_SIGNAL_VOLUME`) |
+| Consecutive up candles | all 3 must close above their open |
+| 9 EMA vs 21 EMA | 9 EMA above the 21 EMA **on all 3 candles** |
+| Price vs 21 EMA | close above the 21 EMA **on all 3 candles** |
+| Relative volume | **not checked** |
+| Liquidity floor | **not checked** — reported only |
+| 24h volume floor | **not checked** — drives the LIQUID/THIN badge |
+| Cooldown | 4 candles per pair |
+
+#### Not a subset of `momentum_surge`
+
+`MOMENTUM_TREND_PRICE_CHANGE_PCT` is **0**, deliberately separate from
+`MOMENTUM_PRICE_CHANGE_PCT`: three green candles holding above a stacked 9/21
+pair is the signal, whatever its size. In the 12,060-evaluation sample above,
+**42 of this analysis's 80 hits were under 5%** and so invisible to
+`momentum_surge`, while 39 of `momentum_surge`'s 77 hits were rejected here as
+counter-trend. The median hit here was +4.52%.
+
+The threshold is 0 rather than removed so that `direction: UP` stays true of
+every alert: it still rejects a window that closed below where it opened,
+which three green candles can manage if one opens below the previous candle's
+close. Raise it if the section gets noisy — it is the one knob trading alert
+count against minimum move size.
+
+#### Why all 3 candles, not just the last one
+
+A single large candle can drag a 9 EMA over a 21 EMA by itself. If the EMA test
+only looked at the signal candle, a pair could pass it *because of the very
+move being alerted on* — which says nothing about the trend the move happened
+in. Requiring the stack on every candle of the window means the 9/21 cross
+already existed **before** the move started, which is the whole claim the
+analysis is making.
+
+The cost is that the freshest crosses are excluded, and those are sometimes
+the best entries. `momentum_surge` still catches those whenever they clear its
+5% bar, but a small first move off a fresh cross is now seen by neither
+analysis. To relax it, compare only the last element of each EMA window in
+`evaluate_trend_momentum_surge_candles`.
+
+There is no slope, separation or ATR test here, unlike the three pullback
+analyses. Those need the EMAs meaningfully apart before a "touch" means
+anything; here the evidence is the run of green candles holding above a
+stacked pair, and the EMAs answer one question only — with the trend, or
+against it?
+
+The 9/21 periods are `MOMENTUM_TREND_FAST_PERIOD` and
+`MOMENTUM_TREND_SLOW_PERIOD`, deliberately separate constants from
+`ema9_pullback`'s `EMA9_*` pair even though both default to 9/21: an impulse
+and a pullback ask different things of the same EMAs and should be tunable
+apart.
+
+### Scenario A — the intended win: an impulse with the trend behind it
+
+SOL/USD has been grinding up for two hours — 9 EMA sitting above the 21 EMA
+the whole time, price holding above both. Three candles then print green in a
+row, $142.00 → $149.40 (**+5.2%**), on $48,000/candle of quote volume.
+
+**Alert fires: UP trend momentum, badged LIQUID.** Every candle of the move
+was green, above the 21 EMA, with the 9/21 stack already in place before the
+first of them. At +5.2% it also clears §3's bar, so it fires in the
+`momentum_surge` section too — a pair appearing in both is the version of this
+signal worth looking at first.
+
+### Scenario B — the other intended catch: a small run §3 never sees
+
+LINK/USD is in the same shape — 9 EMA over the 21, price above both — and
+prints three green candles for a total of **+1.1%** on $30,000/candle.
+
+**Alert fires here, and nowhere else.** This is roughly half of what this
+section sends (42 of 80 hits in the sample were under 5%), and it is the
+practical consequence of dropping the price bar: you see clean trend
+continuation while it is still small, rather than only after a 5% leg has
+already printed. The trade-off is that a +1.1% move is a much weaker piece of
+evidence on its own — the EMA stack and the green run are doing all the work,
+so read the `24h volume` and badge before acting on the small ones.
+
+### Scenario C — the failure mode: a confirmed trend is still a late entry
+
+The same SOL/USD move continues, and 90 minutes later another 3-candle +5%
+leg prints — still green, still stacked, still above the 21 EMA. **Alert
+fires again** (cooldown permitting). But this is now the third leg of an
+extended run, and the trend filter has no concept of *where in a trend's life*
+the move sits: a 9/21 stack looks identical on the first leg and the last one.
+Adding the trend condition removes the counter-trend bounces; it does nothing
+about buying an exhausted uptrend, and by construction the alert still only
+arrives after the move has already happened.
+
+### Scenario D — correctly does *not* fire: the dead-cat bounce
+
+The §3 Scenario E token — down 45% over two days, price under both EMAs, 9 EMA
+below the 21 EMA — bounces +5.4% over 3 candles on real turnover.
+`momentum_surge` fires. **This analysis does not**: the EMAs are stacked the
+wrong way and price is below the 21 EMA on all three candles. This single
+rejection is the reason the analysis exists.
+
+### Scenario E — correctly does *not* fire: the move made its own trend
+
+A pair drifts sideways-to-down for hours, then rips +15% in 3 candles. That is
+violent enough to pull the 9 EMA above the 21 EMA — but only by the *last*
+candle of the window. The first two candles were still stacked bearishly.
+**No alert here**; `momentum_surge` catches it and this one correctly declines
+to call it a trend continuation, since there was no trend until the move
+itself created one.
+
+### Scenario F — correctly does *not* fire: a red candle mid-move
+
+A pair prints +7% over 3 candles inside a clean 9/21 uptrend, but the middle
+candle is red — it opened high, sold off, and the third candle made the gain
+back and more. The +7% total, the EMA stack and the volume all pass. **No
+alert**, because the "3 consecutive up candles" condition fails. This is
+stricter than `momentum_surge`, which only measures the window's first open
+against its last close and never looks at what happened between them.
+
+---
+
+## 5. 9 EMA Pullback (`ema9_pullback`)
 
 **What it checks:** the same "buy the dip in an uptrend" idea as
 `ema_trend_pullback`, but keyed off the faster 9/21 EMA pair instead of
@@ -441,7 +589,7 @@ trend to call this a "pullback within."
 
 ---
 
-## 5. 50 EMA Pullback (`ema50_pullback`)
+## 6. 50 EMA Pullback (`ema50_pullback`)
 
 **What it checks:** the same "buy the dip in an uptrend" idea a third time,
 now one step *slower* than `ema_trend_pullback` — keyed off the classic
@@ -540,11 +688,11 @@ other four analyses still cover it.
 
 ## The honest caveat
 
-All five analyses encode reasonable, standard technical-trading logic, but:
+All six analyses encode reasonable, standard technical-trading logic, but:
 
 - **None of it executes trades.** There's no position sizing, stop-loss, or
   exit logic — these are alerts, not an automated strategy.
-- **All five do better trending, worse chopping.** Crypto spends a lot of
+- **All six do better trending, worse chopping.** Crypto spends a lot of
   time chopping.
 - **Fees and slippage aren't modeled.** A signal that "works" on the chart
   can still lose money after Kraken's taker fee and spread on a thin pair.
