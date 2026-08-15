@@ -351,35 +351,44 @@ def test_trend_momentum_surge_checks_the_candle_before_the_window():
     assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles) is None
 
 
-def test_trend_momentum_surge_ignores_the_momentum_price_bar():
-    """It is not a subset of momentum_surge: a small clean run still fires.
+def test_trend_momentum_surge_fires_between_the_two_price_bars():
+    """It is not a subset of momentum_surge: its size bar is lower.
 
-    Three green candles of +0.1% each is nowhere near MOMENTUM_PRICE_CHANGE_PCT,
-    so momentum_surge declines it -- structure, not size, is the question here.
+    A clean staircase totalling ~3.6% clears this analysis's 3% floor while
+    falling short of momentum_surge's 5%, so it fires here and nowhere else.
     """
-    candles = _momentum_series(move=1.001)
+    candles = _momentum_series(move=1.012)
 
     assert ca.evaluate_momentum_surge_candles("X", "X/USD", candles) is None
 
     hit = ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles)
     assert hit is not None
-    assert hit["price_change_pct"] < ca.MOMENTUM_PRICE_CHANGE_PCT
+    assert (
+        ca.MOMENTUM_TREND_PRICE_CHANGE_PCT
+        <= hit["price_change_pct"]
+        < ca.MOMENTUM_PRICE_CHANGE_PCT
+    )
     assert hit["ema_fast"] > hit["ema_slow"]
 
 
-def test_trend_momentum_surge_price_floor_is_a_working_knob():
-    """At 0 the price test cannot fail -- green candles with rising closes
-    always imply a positive move -- so this raises it to check it still bites.
+def test_trend_momentum_surge_rejects_a_staircase_under_the_price_floor():
+    """A structurally perfect run that is simply too small.
+
+    Three green candles of +0.1% each: every candle and EMA condition passes,
+    and this used to fire when the floor was 0.
     """
     candles = _momentum_series(move=1.001)
-    assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles) is not None
+    hit = ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles)
+    assert hit is None
 
+    # Confirm the price floor is the only thing rejecting it, by dropping the
+    # floor back to where it started.
     original = ca.MOMENTUM_TREND_PRICE_CHANGE_PCT
-    ca.MOMENTUM_TREND_PRICE_CHANGE_PCT = 1.0
+    ca.MOMENTUM_TREND_PRICE_CHANGE_PCT = 0.0
     try:
-        assert ca.evaluate_trend_momentum_surge_candles(
-            "X", "X/USD", candles
-        ) is None
+        relaxed = ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles)
+        assert relaxed is not None
+        assert relaxed["price_change_pct"] < original
     finally:
         ca.MOMENTUM_TREND_PRICE_CHANGE_PCT = original
 

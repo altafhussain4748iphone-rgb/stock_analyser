@@ -1613,11 +1613,13 @@ def render_momentum_surge_item(hit):
 # *every* candle must have closed above its open AND above the previous
 # candle's close, with the 9 EMA above the 21 EMA and the close above the 21
 # EMA at that candle. The "above the previous close" test reaches one bar
-# further back than the window, so it covers the window's first candle too. It
-# shares
-# momentum_surge's volume floor but applies its own price threshold,
-# MOMENTUM_TREND_PRICE_CHANGE_PCT, which is 0 -- so this is NOT a subset of
-# momentum_surge, and most of its hits are moves far too small for the 5% bar.
+# further back than the window, so it covers the window's first candle too.
+#
+# It shares momentum_surge's volume floor but applies its own, lower price
+# threshold: MOMENTUM_TREND_PRICE_CHANGE_PCT (3%) against
+# MOMENTUM_PRICE_CHANGE_PCT (5%). So this is NOT a subset of momentum_surge --
+# a clean 3-5% staircase fires only here, and plenty of 5%+ moves fire only
+# there because their candles are not a staircase.
 #
 # Requiring the EMA state on all three candles (not just the signal one) is
 # what makes this "a run inside an existing uptrend" rather than "a move big
@@ -1702,9 +1704,9 @@ def evaluate_trend_momentum_surge_candles(pair, wsname, closed_candles):
         else 0.0
     )
 
-    # Its own threshold, not momentum_surge's. At 0 it cannot reject anything
-    # (all_candles_up and closes_rising already force a positive move); it is
-    # the knob for putting a size floor back. See the config block.
+    # Its own threshold, not momentum_surge's -- lower, because the candle and
+    # EMA conditions above carry more of the evidence here. See the config
+    # block for why it is 3% rather than 0 or 5%.
     passes_price = stats["price_change_pct"] >= MOMENTUM_TREND_PRICE_CHANGE_PCT
 
     # Badge only, as in momentum_surge -- it cannot suppress a hit.
@@ -1910,10 +1912,11 @@ ALL_ANALYSES = [
             f"{MOMENTUM_TREND_SLOW_PERIOD} EMA on every one of them, on "
             f"average volume of &ge; "
             f"{format_compact_volume(MOMENTUM_MIN_AVG_SIGNAL_VOLUME)} per "
-            "candle. <strong>There is no minimum move size</strong> "
-            f"(momentum surge's {MOMENTUM_PRICE_CHANGE_PCT:.1f}% bar does not "
-            "apply here), so these are graded on structure rather than size "
-            "&mdash; a clean run with the trend, however small. The badge is "
+            f"candle, over a move of &gt;= "
+            f"{MOMENTUM_TREND_PRICE_CHANGE_PCT:.1f}%. That size bar is "
+            f"<strong>lower than momentum surge's "
+            f"{MOMENTUM_PRICE_CHANGE_PCT:.1f}%</strong> because the structure "
+            "above is doing more of the work here. The badge is "
             "the same trailing measure and never blocks an alert: "
             f"<span style=\"color:#1b5e20;font-weight:700;\">LIQUID</span> = "
             f"24h volume &ge; {format_compact_volume(MIN_24H_QUOTE_VOLUME)}, "

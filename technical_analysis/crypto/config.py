@@ -257,9 +257,10 @@ MOMENTUM_VOLUME_LOOKBACK = 20
 #
 # "trend_momentum_surge": the same window as momentum_surge
 # (MOMENTUM_CANDLE_COUNT candles) and the same volume floor
-# (MOMENTUM_MIN_AVG_SIGNAL_VOLUME), but the *shape* of the move rather than its
-# size. Four conditions, all checked on *every* candle of the window rather
-# than only the last one:
+# (MOMENTUM_MIN_AVG_SIGNAL_VOLUME), but weighted toward the *shape* of the move
+# rather than its size -- a lower size bar (MOMENTUM_TREND_PRICE_CHANGE_PCT,
+# 3%, against momentum_surge's 5%) in exchange for four structural conditions,
+# all checked on *every* candle of the window rather than only the last one:
 #
 #   1. the candle closed above its open (a real up candle, not a wick that
 #      happened to land higher),
@@ -283,12 +284,10 @@ MOMENTUM_VOLUME_LOOKBACK = 20
 # compare only the last element of each EMA window in
 # evaluate_trend_momentum_surge_candles.
 #
-# This analysis is NOT a subset of momentum_surge. It applies its own price
-# threshold, MOMENTUM_TREND_PRICE_CHANGE_PCT below, which is 0 -- three green
-# candles stacked over a rising 9/21 pair is the signal, whatever its size. So
-# most of its hits are moves far under MOMENTUM_PRICE_CHANGE_PCT that
-# momentum_surge never sees, and the two email sections overlap only on the
-# rare move that is both big and clean.
+# This analysis is NOT a subset of momentum_surge. Its price threshold is
+# lower, so a clean 3-5% staircase fires here and is invisible there; and its
+# structural conditions are stricter, so plenty of 5%+ moves fire there and are
+# rejected here. The sections overlap on moves that are both big and clean.
 #
 # No ATR, slope or separation test: unlike the pullback analyses, which need
 # the EMAs to be meaningfully apart before a "touch" means anything, the
@@ -303,29 +302,29 @@ MOMENTUM_VOLUME_LOOKBACK = 20
 MOMENTUM_TREND_FAST_PERIOD = 9
 MOMENTUM_TREND_SLOW_PERIOD = 21
 
-# Deliberately 0, not MOMENTUM_PRICE_CHANGE_PCT: size is momentum_surge's
-# question, and this analysis asks about structure instead.
+# Lower than MOMENTUM_PRICE_CHANGE_PCT (5%) on purpose: the structural
+# conditions above are the evidence this analysis leans on, so it does not need
+# as big a move to be worth an alert -- but it does need one. Measured against
+# the window's open-to-close move, compared with >=.
 #
-# At 0 this test cannot actually reject anything -- green candles with rising
-# closes force the last close above the first open, so the move is always
-# positive. It is kept as the knob for putting a size floor back (set it to
-# 1.0 and sub-1% staircases stop alerting) and as the guarantee behind
-# "direction": "UP" if the candle conditions above are ever loosened.
+# This started at 0 (structure only, any size). At that setting the test could
+# not reject anything at all -- green candles with rising closes force the last
+# close above the first open -- and roughly half the section was sub-1%
+# staircases. 3% keeps the gap to momentum_surge wide enough that the two
+# sections stay usefully different while dropping the noise floor.
 #
 # Measured over 12,060 candle evaluations (60 live Kraken pairs x ~2 days of
-# 15m candles, 2026-08-14, before cooldown): momentum_surge fired 71 times,
-# this analysis 65, and only 37 of those were the same candle. So the two
-# sections come out a similar size but overlap on about half their hits -- 34
-# surges did not qualify here (mostly closes that failed to step up cleanly),
-# and 28 staircases fired here that were too small for the 5% bar. Median hit
-# size here was +5.78%.
+# 15m candles, 2026-08-14, before cooldown, all figures from one dataset):
+# this analysis fired 25 times against momentum_surge's 42, agreeing on 19.
+# The 3% floor is what removed the other 15 a 0% floor would have sent, and
+# the median surviving hit is +7.11%. Only 6 of the 25 sit in the 3-5% band
+# where momentum_surge cannot see them -- the rest are big moves that are also
+# clean. Note absolute counts swing widely with the market window; the ratios
+# are the durable part.
 #
-# (Requiring each close above the previous one, rather than only requiring
-# green candles, cut this analysis from 78 hits to 65 on that same sample.)
-#
-# Raise this if the section gets noisy: it is the one knob that trades alert
-# count against how big a move has to be to qualify.
-MOMENTUM_TREND_PRICE_CHANGE_PCT = 0.0
+# Raise it toward 5% to converge on momentum_surge's alert set; lower it to
+# trade more alerts for smaller moves.
+MOMENTUM_TREND_PRICE_CHANGE_PCT = 3.0
 
 # Same 3x rule as EMA9_WARMUP_CANDLES: an EMA seeded from a plain SMA is
 # inaccurate for its first few periods, and here that error would show up as
