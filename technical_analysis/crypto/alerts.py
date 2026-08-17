@@ -1611,9 +1611,15 @@ def render_momentum_surge_item(hit):
 # evaluate_trend_momentum_surge_candles: the shape of the move rather than its
 # size. Over the same MOMENTUM_CANDLE_COUNT window momentum_surge measures,
 # *every* candle must have closed above its open AND above the previous
-# candle's close, with the 9 EMA above the 21 EMA and the close above the 21
-# EMA at that candle. The "above the previous close" test reaches one bar
-# further back than the window, so it covers the window's first candle too.
+# candle's close -- the "above the previous close" test reaches one bar further
+# back than the window, so it covers the window's first candle too. Then, on
+# the signal candle alone, the 9 EMA must be above the 21 EMA with the close
+# above the 21 EMA.
+#
+# The per-candle tests describe the run; the EMA test places it in a trend.
+# Both EMA comparisons used to run across the whole window, which also required
+# the 9/21 cross to predate the run -- that excluded the freshest crosses, and
+# was relaxed to match momentum_surge's signal-candle-only reading.
 #
 # It shares momentum_surge's volume floor but applies its own, lower price
 # threshold: MOMENTUM_TREND_PRICE_CHANGE_PCT (3%) against
@@ -1621,11 +1627,7 @@ def render_momentum_surge_item(hit):
 # a clean 3-5% staircase fires only here, and plenty of 5%+ moves fire only
 # there because their candles are not a staircase.
 #
-# Requiring the EMA state on all three candles (not just the signal one) is
-# what makes this "a run inside an existing uptrend" rather than "a move big
-# enough to drag the 9 EMA over the 21 by its last bar". See the config block
-# for the trade-off.
-#
+
 # The LIQUID/THIN badge behaves exactly as it does for momentum_surge: it is
 # computed from trailing 24h volume and can never suppress a hit.
 # -----------------------------------------------------------------------------
@@ -1657,19 +1659,11 @@ def evaluate_trend_momentum_surge_candles(pair, wsname, closed_candles):
 
     fast_series = calculate_ema_series(closed_candles, MOMENTUM_TREND_FAST_PERIOD)
     slow_series = calculate_ema_series(closed_candles, MOMENTUM_TREND_SLOW_PERIOD)
-    if (
-        len(fast_series) < MOMENTUM_CANDLE_COUNT
-        or len(slow_series) < MOMENTUM_CANDLE_COUNT
-    ):
+    if not fast_series or not slow_series:
         return None
 
     window = stats["window"]
     signal_candle = stats["signal_candle"]
-
-    # Both series end at closed_candles[-1], so slicing the same number of
-    # values off each end lines them up candle for candle with `window`.
-    fast_window = fast_series[-MOMENTUM_CANDLE_COUNT:]
-    slow_window = slow_series[-MOMENTUM_CANDLE_COUNT:]
 
     all_candles_up = all(
         candle["close"] > candle["open"] for candle in window
@@ -1688,16 +1682,18 @@ def evaluate_trend_momentum_surge_candles(pair, wsname, closed_candles):
         later > earlier for earlier, later in zip(closes, closes[1:])
     )
 
-    ema_stacked = all(
-        fast > slow for fast, slow in zip(fast_window, slow_window)
-    )
-    above_slow_ema = all(
-        candle["close"] > slow
-        for candle, slow in zip(window, slow_window)
-    )
+    ema_fast_now = fast_series[-1]
+    ema_slow_now = slow_series[-1]
 
-    ema_fast_now = fast_window[-1]
-    ema_slow_now = slow_window[-1]
+    # Signal candle only, matching momentum_surge -- the EMA pair answers "is
+    # the pair in a 9/21 uptrend as this run finishes", and the staircase
+    # conditions above are what describe the run itself. This used to be
+    # checked on every candle of the window, which additionally required the
+    # 9/21 cross to predate the run; relaxing it lets the freshest crosses
+    # through, which are often the better entries.
+    ema_stacked = ema_fast_now > ema_slow_now
+    above_slow_ema = signal_candle["close"] > ema_slow_now
+
     ema_gap_pct = (
         (ema_fast_now - ema_slow_now) / ema_slow_now * 100.0
         if ema_slow_now > 0
@@ -1906,10 +1902,10 @@ ALL_ANALYSES = [
         "render_item": render_trend_momentum_surge_item,
         "section_intro": lambda _confirm_label: (
             f"<p>All {MOMENTUM_CANDLE_COUNT} candles closed above their open "
-            "<em>and</em> above the previous candle's close, "
-            f"with the {MOMENTUM_TREND_FAST_PERIOD} EMA above the "
-            f"{MOMENTUM_TREND_SLOW_PERIOD} EMA and the close above the "
-            f"{MOMENTUM_TREND_SLOW_PERIOD} EMA on every one of them, on "
+            "<em>and</em> above the previous candle's close, with the signal "
+            f"candle closing above the {MOMENTUM_TREND_SLOW_PERIOD} EMA and "
+            f"the {MOMENTUM_TREND_FAST_PERIOD} EMA above the "
+            f"{MOMENTUM_TREND_SLOW_PERIOD} EMA, on "
             f"average volume of &ge; "
             f"{format_compact_volume(MOMENTUM_MIN_AVG_SIGNAL_VOLUME)} per "
             f"candle, over a move of &gt;= "

@@ -259,12 +259,16 @@ MOMENTUM_VOLUME_LOOKBACK = 20
 # (MOMENTUM_CANDLE_COUNT candles) and the same volume floor
 # (MOMENTUM_MIN_AVG_SIGNAL_VOLUME), but weighted toward the *shape* of the move
 # rather than its size -- a lower size bar (MOMENTUM_TREND_PRICE_CHANGE_PCT,
-# 3%, against momentum_surge's 5%) in exchange for four structural conditions,
-# all checked on *every* candle of the window rather than only the last one:
+# 3%, against momentum_surge's 5%) in exchange for four structural conditions.
+# The first two are checked on *every* candle of the window:
 #
 #   1. the candle closed above its open (a real up candle, not a wick that
-#      happened to land higher),
-#   2. the candle closed above the previous candle's close,
+#      happened to land higher), and
+#   2. the candle closed above the previous candle's close.
+#
+# The other two are checked on the signal candle only, the same reading
+# momentum_surge uses for its own 21/50 pair:
+#
 #   3. the 9 EMA was above the 21 EMA, and
 #   4. the close was above the 21 EMA.
 #
@@ -276,13 +280,15 @@ MOMENTUM_VOLUME_LOOKBACK = 20
 # last. (2) compares the window's first candle against the bar immediately
 # *before* the window, so "every candle" really is every candle.
 #
-# Checking all three candles is the strict reading: it means the whole run
-# happened inside an established 9/21 uptrend, not that the move itself dragged
-# the EMAs into line by its last bar. That excludes the freshest 9/21 crosses,
-# which is the trade-off -- momentum_surge still fires on those (whenever they
-# clear its 5% bar), they just aren't badged as trend-confirmed. To relax it,
-# compare only the last element of each EMA window in
-# evaluate_trend_momentum_surge_candles.
+# (3) and (4) originally ran across the whole window too. That was the strict
+# reading -- it required the 9/21 cross to predate the run rather than merely
+# to hold once it finished -- and it excluded the freshest crosses, which are
+# often the better entries. Relaxed on 2026-08-14 to the signal candle. To
+# restore it, zip the last MOMENTUM_CANDLE_COUNT values of each EMA series
+# against the window in evaluate_trend_momentum_surge_candles.
+#
+# The per-candle conditions (1) and (2) are what still make this a *shape*
+# test: they describe the run, while the EMA pair places it in a trend.
 #
 # This analysis is NOT a subset of momentum_surge. Its price threshold is
 # lower, so a clean 3-5% staircase fires here and is invisible there; and its
@@ -315,10 +321,10 @@ MOMENTUM_TREND_SLOW_PERIOD = 21
 #
 # Measured over 12,060 candle evaluations (60 live Kraken pairs x ~2 days of
 # 15m candles, 2026-08-14, before cooldown, all figures from one dataset):
-# this analysis fired 25 times against momentum_surge's 42, agreeing on 19.
-# The 3% floor is what removed the other 15 a 0% floor would have sent, and
-# the median surviving hit is +7.11%. Only 6 of the 25 sit in the 3-5% band
-# where momentum_surge cannot see them -- the rest are big moves that are also
+# this analysis fired 30 times against momentum_surge's 36, agreeing on 19.
+# The 3% floor is what removed the other 20 a 0% floor would have sent, and
+# the median surviving hit is +7.20%. Only 8 of the 30 sit under 5%, where
+# momentum_surge cannot see them -- the rest are big moves that are also
 # clean. Note absolute counts swing widely with the market window; the ratios
 # are the durable part.
 #

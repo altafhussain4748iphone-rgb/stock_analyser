@@ -34,18 +34,18 @@ ENABLED_ANALYSES = {
 The two enabled ones ask different questions about the same 3-candle window.
 `momentum_surge` asks **how big** the move was (≥ 5%, ending in a 21/50 EMA
 uptrend); `trend_momentum_surge` asks **what shape** it was (three green
-candles, each closing higher than the last, above a stacked 9/21 EMA pair,
-over a lower ≥ 3% bar). Both require an uptrend, but of different pairs and
-over different spans, and neither is a subset of the other. Measured over
-12,060 candle evaluations — 60 pairs × ~2 days of 15m candles, 2026-08-14,
-before cooldown — they fired **42** and **25** times and agreed on **19** of
-those candles. When a pair does appear in both sections, that is the strongest
-version of the signal: a large move that was also structurally clean.
+candles, each closing higher than the last, over a lower ≥ 3% bar). Both
+require an uptrend on the signal candle, but of different EMA pairs, and
+neither is a subset of the other. Measured over 12,060 candle evaluations — 60
+pairs × ~2 days of 15m candles, 2026-08-14, before cooldown — they fired **36**
+and **30** times and agreed on **19** of those candles. When a pair does appear
+in both sections, that is the strongest version of the signal: a large move
+that was also structurally clean.
 
-Absolute counts swing widely with the market window — an earlier 2-day sample
-put the same two analyses at 71 and 65. Every figure quoted below comes from
-the single 2026-08-14 dataset, so the ratios between them are comparable even
-though the totals are not a forecast of any given day.
+Absolute counts swing widely with the market window — samples taken hours
+apart put the same two analyses at 71/65 and 36/30. Every figure quoted below
+comes from one 2026-08-14 dataset, so the ratios between them are comparable
+even though the totals are not a forecast of any given day.
 
 Note what turning `ema9_pullback` off gives up: it was the one analysis fast
 enough to catch the *first* dip after a `momentum_surge` impulse (see §5
@@ -421,10 +421,10 @@ particular move traded $400 a candle.
 ## 4. Trend Momentum Surge (`trend_momentum_surge`)
 
 **What it checks:** mostly the *shape* of a 3-candle move rather than its
-size. Over the same window §3 measures, every candle must have closed above
-its open **and** above the previous candle's close, with the 9 EMA above the
-21 EMA and the close above the 21 EMA — on **all three**, not just the last
-one. It keeps §3's $5,000 volume floor and lowers its price bar from 5% to
+size. Over the same window §3 measures, **every** candle must have closed
+above its open and above the previous candle's close; then, on the **signal
+candle** only, the 9 EMA must be above the 21 EMA with the close above the 21
+EMA. It keeps §3's $5,000 volume floor and lowers its price bar from 5% to
 **3%**, rather than dropping it.
 
 Both momentum analyses now reject the §3 Scenario E dead-cat bounce — a pair
@@ -439,8 +439,8 @@ EMA pair that turns days sooner than the 50 EMA does.
 | Average quote volume over those 3 candles | ≥ **$5,000** per candle (`MOMENTUM_MIN_AVG_SIGNAL_VOLUME`) |
 | Consecutive up candles | all 3 must close above their open |
 | Rising closes | each of the 3 must close above the previous candle's close |
-| 9 EMA vs 21 EMA | 9 EMA above the 21 EMA **on all 3 candles** |
-| Price vs 21 EMA | close above the 21 EMA **on all 3 candles** |
+| 9 EMA vs 21 EMA | 9 EMA above the 21 EMA **on the signal candle** |
+| Price vs 21 EMA | close above the 21 EMA **on the signal candle** |
 | Relative volume | **not checked** |
 | Liquidity floor | **not checked** — reported only |
 | 24h volume floor | **not checked** — drives the LIQUID/THIN badge |
@@ -463,7 +463,7 @@ so "every candle" really is every candle rather than just the two comparisons
 available inside it.
 
 On the 12,060-evaluation sample above, the rising-closes rule cut this
-analysis from **28 hits to 25** — the green runs whose closes did not actually
+analysis from **34 hits to 30** — the green runs whose closes did not actually
 step up.
 
 #### Not a subset of `momentum_surge`
@@ -471,39 +471,37 @@ step up.
 `MOMENTUM_TREND_PRICE_CHANGE_PCT` (**3%**) is deliberately separate from
 `MOMENTUM_PRICE_CHANGE_PCT` (**5%**), and lower, because the structural
 conditions above carry more of the evidence here. The two analyses diverge in
-both directions: in that same sample **6 of this analysis's 25 hits sat in the
-3–5% band**, invisible to `momentum_surge`, while **23 of `momentum_surge`'s
-42** were not staircases and did not qualify here. The median hit here was
-+7.11%.
+both directions: in that same sample **8 of this analysis's 30 hits sat under
+5%**, invisible to `momentum_surge`, while **17 of `momentum_surge`'s 36** were
+not staircases and did not qualify here. The median hit here was +7.20%.
 
 This threshold started at **0** — structure only, any size. At that setting it
 could not reject anything at all (green candles with rising closes force the
 last close above the first open, so the move is always positive) and the
-section was dominated by sub-1% runs: the 3% floor removes **15 of the 40**
+section was dominated by sub-1% runs: the 3% floor removes **20 of the 50**
 hits a 0% floor would have sent. Raise it toward 5% to converge on
 `momentum_surge`'s alert set; lower it to trade more alerts for smaller
 moves.
 
-#### Why all 3 candles, not just the last one
+#### Per-candle for shape, signal candle for trend
 
-A single large candle can drag a 9 EMA over a 21 EMA by itself. If the EMA test
-only looked at the signal candle, a pair could pass it *because of the very
-move being alerted on* — which says nothing about the trend the move happened
-in. Requiring the stack on every candle of the window means the 9/21 cross
-already existed **before** the move started, which is the whole claim the
-analysis is making.
+The division of labour is deliberate. The staircase tests describe the *run*,
+so they have to look at each bar. The EMA pair only places that run in a
+trend, which is a question about where the pair stands when the run finishes —
+the same reading §3 uses for its own 21/50 pair.
 
-The cost is that the freshest crosses are excluded, and those are sometimes
-the best entries. `momentum_surge` still catches those whenever they clear its
-5% bar, but a small first move off a fresh cross is now seen by neither
-analysis. To relax it, compare only the last element of each EMA window in
-`evaluate_trend_momentum_surge_candles`.
+Both EMA comparisons originally ran across the whole window, which additionally
+required the 9/21 cross to **predate** the run. That was the stricter claim,
+and its cost was excluding the freshest crosses — often the better entries,
+since a small first move off a new cross cleared neither this analysis's window
+test nor §3's 5% bar. Relaxed on 2026-08-14; it added 6 hits in the sample
+below (24 → 30). To restore it, zip the last 3 values of each EMA series
+against the window in `evaluate_trend_momentum_surge_candles`.
 
 There is no slope, separation or ATR test here, unlike the three pullback
 analyses. Those need the EMAs meaningfully apart before a "touch" means
-anything; here the evidence is the run of green candles holding above a
-stacked pair, and the EMAs answer one question only — with the trend, or
-against it?
+anything; here the evidence is the staircase itself, and the EMAs answer one
+question only — with the trend, or against it?
 
 The 9/21 periods are `MOMENTUM_TREND_FAST_PERIOD` and
 `MOMENTUM_TREND_SLOW_PERIOD`, deliberately separate constants from
@@ -530,7 +528,7 @@ prints three green candles, each closing above the last, for a total of
 **+3.4%** on $30,000/candle.
 
 **Alert fires here, and nowhere else** — it clears this analysis's 3% bar but
-not §3's 5%. That 3–5% band was 6 of the 25 hits in the sample, and it is the
+not §3's 5%. Sub-5% moves were 8 of the 30 hits in the sample, and it is the
 practical point of the lower bar: you see clean trend continuation a leg
 earlier than §3 would show it. Below 3% the same shape no longer qualifies, on
 the view that a staircase that small is not worth an alert however tidy it
@@ -556,15 +554,18 @@ candles. §3 rejects it too, on its own 21/50 filter, so this is now a case both
 momentum analyses decline — but the 9/21 pair here declines it *sooner*, since
 a 50 EMA takes far longer to roll over than a 21 EMA does.
 
-### Scenario E — correctly does *not* fire: the move made its own trend
+### Scenario E — now fires: the move made its own trend
 
-A pair drifts sideways-to-down for hours, then rips +15% in 3 candles. That is
-violent enough to pull the 9 EMA above the 21 EMA — but only by the *last*
-candle of the window. The first two candles were still stacked bearishly.
-**No alert here.** §3 may well take it (a 15% candle can clear both the 21 and
-50 EMA on the signal bar, which is all its filter asks), and this one correctly
-declines to call it a trend continuation, since there was no trend until the
-move itself created one.
+A pair drifts sideways-to-down for hours, then rips +15% in 3 green, rising
+candles. That is violent enough to pull the 9 EMA above the 21 EMA — but only
+by the *last* candle of the window; the first two were still stacked bearishly.
+
+**Alert fires**, since the EMA pair is read on the signal candle. Before the
+2026-08-14 relaxation it did not, on the argument that the move manufactured
+its own trend rather than joining one. Both readings are defensible; this one
+is the more permissive, and it is what makes the freshest 9/21 crosses
+reachable. §3 will often take this candle too, so it is a case to check on the
+chart rather than trust from the alert alone.
 
 ### Scenario F — correctly does *not* fire: a red candle mid-move
 
@@ -582,7 +583,7 @@ second one opens well below the first one's close and recovers only part of
 the way: green in itself, yet it closes *lower* than the candle before it. The
 green-candle test passes and the EMA tests pass. **No alert**, because the
 closes do not step up — this is chop inside a trend, not a run. It is the case
-the rising-closes rule was added for, and it accounted for 3 of the 28 hits
+the rising-closes rule was added for, and it accounted for 4 of the 34 hits
 this section would otherwise have sent in the sample.
 
 ---

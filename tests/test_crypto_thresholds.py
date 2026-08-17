@@ -277,9 +277,12 @@ def test_trend_momentum_surge_skips_a_bounce_inside_a_downtrend():
     assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", downtrend) is None
 
 
-def test_trend_momentum_surge_requires_the_cross_to_predate_the_window():
-    """A move violent enough to drag the 9 EMA over the 21 by its last candle
-    is still not a trend -- all three candles must already be stacked.
+def test_trend_momentum_surge_accepts_a_cross_on_the_signal_candle():
+    """The EMA pair is read on the signal candle only, so a run that completes
+    the 9/21 cross on its last bar still qualifies.
+
+    This used to be rejected, back when both EMA comparisons ran across the
+    whole window and so required the cross to predate the run.
     """
     candles = _momentum_series(drift=0.997, move=1.05)
 
@@ -289,6 +292,51 @@ def test_trend_momentum_surge_requires_the_cross_to_predate_the_window():
     # of the window only.
     assert fast[-1] > slow[-1]
     assert fast[-2] < slow[-2]
+
+    hit = ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles)
+    assert hit is not None
+    assert hit["ema_fast"] == fast[-1]
+    assert hit["ema_slow"] == slow[-1]
+
+
+def test_trend_momentum_surge_still_needs_the_signal_candle_above_the_slow_ema():
+    """Relaxing the EMA tests to the signal candle did not drop them.
+
+    A sharp drop followed by a clean +4.9% staircase that has not yet
+    reclaimed the 21 EMA: every candle condition passes and the size clears the
+    floor, but the EMA gate rejects it. Both halves of that gate fail together
+    here, which is the normal case -- price under the 21 EMA after a drop
+    usually means the 9 EMA is under it too.
+    """
+    candles = _momentum_series()
+    base = candles[-8]["close"]
+
+    for i, mult in enumerate((0.94, 0.90, 0.88, 0.87)):
+        candle = candles[-7 + i]
+        for key in ("open", "close", "high", "low", "vwap"):
+            candle[key] = base * mult
+        candle["volume"] = 50_000.0 / candle["close"]
+
+    for i, (open_, close_) in enumerate(
+        ((0.872, 0.885), (0.886, 0.900), (0.901, 0.915))
+    ):
+        candle = candles[-3 + i]
+        candle["open"], candle["close"] = base * open_, base * close_
+        candle["high"], candle["low"] = candle["close"], candle["open"]
+        candle["vwap"] = candle["close"]
+        candle["volume"] = 50_000.0 / candle["close"]
+
+    window = candles[-3:]
+    closes = [candles[-4]["close"]] + [c["close"] for c in window]
+    slow = ca.calculate_ema_series(candles, ca.MOMENTUM_TREND_SLOW_PERIOD)
+
+    # The fixture is a valid staircase over a qualifying move ...
+    assert all(c["close"] > c["open"] for c in window)
+    assert all(b > a for a, b in zip(closes, closes[1:]))
+    change = (window[-1]["close"] - window[0]["open"]) / window[0]["open"] * 100
+    assert change >= ca.MOMENTUM_TREND_PRICE_CHANGE_PCT
+    # ... that simply has not reclaimed the 21 EMA yet.
+    assert window[-1]["close"] < slow[-1]
 
     assert ca.evaluate_trend_momentum_surge_candles("X", "X/USD", candles) is None
 
