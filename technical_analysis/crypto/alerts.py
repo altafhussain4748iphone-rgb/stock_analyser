@@ -54,6 +54,7 @@ from technical_analysis.crypto.config import (
     MIN_CLOSE_LOCATION,
     MIN_MEDIAN_QUOTE_VOLUME,
     MIN_MEDIAN_TRADE_COUNT,
+    MIN_SIGNAL_QUOTE_VOLUME,
     MIN_SIGNAL_TRADE_COUNT,
     MIN_VOLUME_MULTIPLE,
     MIN_VOLUME_ROBUST_Z,
@@ -513,6 +514,9 @@ def evaluate_signal_candle(pair, wsname, history, signal_candle):
     if candle_range <= 0 or signal_candle["open"] <= 0:
         return None
 
+    if not _passes_signal_quote_volume(signal_candle):
+        return None
+
     body = abs(signal_candle["close"] - signal_candle["open"])
     body_ratio = body / candle_range
     body_atr = body / atr
@@ -816,6 +820,19 @@ def _ema_ready(closed_candles):
     return fast_series, slow_series, atr
 
 
+def _passes_signal_quote_volume(signal_candle):
+    """The one volume test every analysis shares.
+
+    Distinct from the liquidity filters below it: those ask whether the *pair*
+    is worth trading, over a trailing window, and the momentum analyses are
+    exempt from them. This asks whether the candle being alerted on actually
+    traded, and nothing is exempt. See MIN_SIGNAL_QUOTE_VOLUME in config.py.
+    """
+    return (
+        signal_candle["volume"] * signal_candle["vwap"] >= MIN_SIGNAL_QUOTE_VOLUME
+    )
+
+
 def _liquidity_stats(history, signal_candle):
     volume_window = history[-VOLUME_LOOKBACK:]
     historical_quote_volumes = [
@@ -852,6 +869,9 @@ def evaluate_ema_trend_pullback_candle(pair, wsname, closed_candles):
 
     signal_candle = closed_candles[-1]
     if signal_candle["open"] <= 0:
+        return None
+
+    if not _passes_signal_quote_volume(signal_candle):
         return None
 
     ema_fast_now = fast_series[-1]
@@ -1024,6 +1044,9 @@ def evaluate_ema9_pullback_candle(pair, wsname, closed_candles):
     if signal_candle["open"] <= 0:
         return None
 
+    if not _passes_signal_quote_volume(signal_candle):
+        return None
+
     ema_fast_now = fast_series[-1]
     ema_slow_now = slow_series[-1]
     ema_slow_then = slow_series[-1 - EMA9_TREND_LOOKBACK]
@@ -1192,6 +1215,9 @@ def evaluate_ema50_pullback_candle(pair, wsname, closed_candles):
 
     signal_candle = closed_candles[-1]
     if signal_candle["open"] <= 0:
+        return None
+
+    if not _passes_signal_quote_volume(signal_candle):
         return None
 
     ema_fast_now = fast_series[-1]
@@ -1437,6 +1463,9 @@ def evaluate_momentum_surge_candles(pair, wsname, closed_candles):
         return None
 
     signal_candle = stats["signal_candle"]
+    if not _passes_signal_quote_volume(signal_candle):
+        return None
+
     passes_price = stats["price_change_pct"] >= MOMENTUM_PRICE_CHANGE_PCT
 
     fast_series = calculate_ema_series(closed_candles, EMA_FAST_PERIOD)
@@ -1664,6 +1693,9 @@ def evaluate_trend_momentum_surge_candles(pair, wsname, closed_candles):
 
     window = stats["window"]
     signal_candle = stats["signal_candle"]
+
+    if not _passes_signal_quote_volume(signal_candle):
+        return None
 
     all_candles_up = all(
         candle["close"] > candle["open"] for candle in window

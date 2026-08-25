@@ -111,6 +111,26 @@ MIN_MEDIAN_QUOTE_VOLUME = 1_000.0
 # is also surfaced on every alert for manual review.
 MIN_24H_QUOTE_VOLUME = 50_000.0
 
+# Absolute per-candle floor on the signal candle's own quote volume, applied
+# to *every* analysis. Unlike everything else in this block it is not gated by
+# REQUIRE_LIQUIDITY_FILTER, and unlike the two filters above it is not something
+# the momentum analyses are exempt from -- it is the one volume test all six
+# share.
+#
+# It exists because "the pair is liquid" and "this candle traded" are different
+# claims, and the signal candle is the one being alerted on. A thin token can
+# sit at a fixed price through candles with $0 of turnover and still produce a
+# qualifying window when it finally ticks: US/USD on 2026-08-16 printed 09:15
+# through 09:45 at exactly 0.017370 on $868, $0 and $0. A move measured across
+# candles like those is an artefact of nothing trading, not a signal.
+#
+# $100 is deliberately far below MIN_MEDIAN_QUOTE_VOLUME ($1,000) and
+# MOMENTUM_MIN_AVG_SIGNAL_VOLUME ($5,000): this is not a liquidity opinion, it
+# is a floor under "did anything happen at all". Raising it toward $1,000 turns
+# it into a real filter for the momentum analyses, which have no other
+# per-candle volume gate.
+MIN_SIGNAL_QUOTE_VOLUME = 100.0
+
 # Liquidity/activity filters. Enable once you've picked floors
 # (MIN_MEDIAN_QUOTE_VOLUME, MIN_MEDIAN_TRADE_COUNT, MIN_SIGNAL_TRADE_COUNT)
 # that fit the pairs you trade.

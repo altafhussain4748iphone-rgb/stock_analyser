@@ -133,6 +133,66 @@ def _momentum_series(signal_volume=50_000.0, baseline_volume=50_000.0,
     return out
 
 
+def _starve_signal_candle(candles, quote_volume=50.0):
+    """Leave the window intact but make its last candle trade almost nothing."""
+    signal = candles[-1]
+    signal["volume"] = quote_volume / signal["vwap"]
+    return candles
+
+
+def test_signal_quote_volume_floor_blocks_the_momentum_analyses():
+    """MIN_SIGNAL_QUOTE_VOLUME is the one volume gate the momentum analyses
+    are not exempt from.
+
+    The 3-candle average stays far above MOMENTUM_MIN_AVG_SIGNAL_VOLUME, so
+    the new per-candle floor is the only thing rejecting these.
+    """
+    for evaluate in (ca.evaluate_momentum_surge_candles,
+                     ca.evaluate_trend_momentum_surge_candles):
+        candles = _momentum_series()
+        assert evaluate("X", "X/USD", candles) is not None
+
+        _starve_signal_candle(candles)
+        stats = ca._momentum_window_stats(candles)
+        assert stats["average_signal_volume"] >= ca.MOMENTUM_MIN_AVG_SIGNAL_VOLUME
+        signal = candles[-1]
+        assert signal["volume"] * signal["vwap"] < ca.MIN_SIGNAL_QUOTE_VOLUME
+
+        assert evaluate("X", "X/USD", candles) is None
+
+
+def test_signal_quote_volume_floor_is_compared_with_greater_or_equal():
+    """Matches the other MIN_* floors in config.py."""
+    candles = _momentum_series()
+    _starve_signal_candle(candles, quote_volume=ca.MIN_SIGNAL_QUOTE_VOLUME)
+    assert ca.evaluate_momentum_surge_candles("X", "X/USD", candles) is not None
+
+    candles = _momentum_series()
+    _starve_signal_candle(candles, quote_volume=ca.MIN_SIGNAL_QUOTE_VOLUME - 1)
+    assert ca.evaluate_momentum_surge_candles("X", "X/USD", candles) is None
+
+
+def test_every_analysis_applies_the_signal_quote_volume_floor():
+    """Source-level, so an analysis added later cannot quietly skip it.
+
+    The three pullback analyses and breakout have no cheap fixture here, and
+    a behavioural test per analysis would not catch a *new* seventh one.
+    """
+    import inspect
+
+    evaluators = [
+        obj for name, obj in vars(ca).items()
+        if name.startswith("evaluate_") and inspect.isfunction(obj)
+    ]
+    assert len(evaluators) == 6, [f.__name__ for f in evaluators]
+
+    missing = [
+        f.__name__ for f in evaluators
+        if "_passes_signal_quote_volume" not in inspect.getsource(f)
+    ]
+    assert not missing, f"analyses missing the volume floor: {missing}"
+
+
 def test_momentum_surge_ignores_relative_volume():
     """Fading volume no longer blocks a hit -- only the absolute floor does."""
     faded = ca.evaluate_momentum_surge_candles(

@@ -68,12 +68,33 @@ rather than re-alerting on pairs it had already covered.
 The rest of this document describes all six analyses regardless of whether
 they are currently enabled.
 
-### Two liquidity filters apply to four of the six analyses
+### One volume floor applies to all six analyses
 
-> **Both momentum analyses are exempt from both filters.** Neither filter
-> below can suppress a `momentum_surge` or `trend_momentum_surge` alert — they
-> report volume instead of gating on it, via a LIQUID/THIN badge (see §3).
-> Everything in this section applies to `breakout`, `ema_trend_pullback`,
+**`MIN_SIGNAL_QUOTE_VOLUME` ($100)**: the signal candle must itself have
+traded at least $100 of quote volume. Nothing is exempt — not the momentum
+analyses, which sit outside every other liquidity filter — and it is not gated
+by `REQUIRE_LIQUIDITY_FILTER`.
+
+It exists because "this pair is liquid" and "this candle traded" are different
+claims, and the candle being alerted on is the one that matters. A thin token
+can hold a fixed price through candles with no turnover at all and still
+produce a qualifying window when it finally ticks: US/USD on 2026-08-16
+printed 09:15, 09:30 and 09:45 at exactly 0.017370 on **$868, $0 and $0**. A
+percentage move measured across candles like those is an artefact of nothing
+trading.
+
+At $100 this is not a liquidity opinion — it sits far below
+`MIN_MEDIAN_QUOTE_VOLUME` ($1,000) and `MOMENTUM_MIN_AVG_SIGNAL_VOLUME`
+($5,000) — it is a floor under "did anything happen at all". Raise it toward
+$1,000 to turn it into a real filter for the momentum analyses, which have no
+other per-candle volume gate.
+
+### Two more liquidity filters apply to four of the six analyses
+
+> **Both momentum analyses are exempt from both filters below.** Neither can
+> suppress a `momentum_surge` or `trend_momentum_surge` alert — they report
+> volume instead of gating on it, via a LIQUID/THIN badge (see §3). Everything
+> in the rest of this section applies to `breakout`, `ema_trend_pullback`,
 > `ema9_pullback` and `ema50_pullback`.
 
 - **Per-candle liquidity filter** (`REQUIRE_LIQUIDITY_FILTER`, currently
@@ -145,6 +166,7 @@ that pokes through and fades.
 | Volume vs 96-candle median | ≥ 2.0× **and** robust z-score ≥ 3.0 |
 | Liquidity floor | median quote volume ≥ $1,000, ≥5 trades/candle |
 | 24h volume floor | ≥ $50,000 |
+| Signal-candle volume | ≥ **$100** (`MIN_SIGNAL_QUOTE_VOLUME`, applies to all six) |
 | Cooldown | 4 candles per pair |
 
 ### Scenario A — the intended win: volume-backed breakout continues
@@ -220,6 +242,7 @@ extended breakout.
 | Reclaim body | ≥ 0.15 × ATR (close − open) |
 | Liquidity floor | same as breakout |
 | 24h volume floor | same as breakout |
+| Signal-candle volume | ≥ **$100** (`MIN_SIGNAL_QUOTE_VOLUME`) |
 
 ### Scenario A — the intended win: low-risk trend continuation entry
 
@@ -269,6 +292,7 @@ remains.
 | Relative volume | **not checked** — reported only |
 | Liquidity floor | **not checked** — reported only |
 | 24h volume floor | **not checked** — drives the LIQUID/THIN badge |
+| Signal-candle volume | ≥ **$100** (`MIN_SIGNAL_QUOTE_VOLUME`) — the one volume gate these two do not escape |
 | Cooldown | 4 candles per pair |
 
 #### "UP" means "in an uptrend" again
@@ -444,6 +468,7 @@ EMA pair that turns days sooner than the 50 EMA does.
 | Relative volume | **not checked** |
 | Liquidity floor | **not checked** — reported only |
 | 24h volume floor | **not checked** — drives the LIQUID/THIN badge |
+| Signal-candle volume | ≥ **$100** (`MIN_SIGNAL_QUOTE_VOLUME`) — the one volume gate these two do not escape |
 | Cooldown | 4 candles per pair |
 
 #### Green candles and rising closes are two different tests
@@ -609,6 +634,7 @@ the earliest pullback worth buying.
 | Reclaim body | ≥ 0.15 × ATR (close − open) |
 | Liquidity floor | same as breakout |
 | 24h volume floor | same as breakout |
+| Signal-candle volume | ≥ **$100** (`MIN_SIGNAL_QUOTE_VOLUME`) |
 
 ### Scenario A — the intended win: catching the first dip after a fresh impulse
 
@@ -661,6 +687,7 @@ each hit is a dip within structural trend rather than a fresh impulse.
 | Reclaim body | ≥ 0.15 × ATR (close − open) |
 | Liquidity floor | same as breakout |
 | 24h volume floor | same as breakout |
+| Signal-candle volume | ≥ **$100** (`MIN_SIGNAL_QUOTE_VOLUME`) |
 
 The thresholds move in the same direction the pair does relative to 21/50:
 looser on slope (a 200 EMA advances roughly a quarter as fast per candle as
